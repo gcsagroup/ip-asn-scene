@@ -1,5 +1,7 @@
 config.yaml
-data/
+data/cache/
+data/evaluation/
+data/raw/bgp/
 cache/
 dist/
 /ipasn

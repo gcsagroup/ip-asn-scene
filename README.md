@@ -209,7 +209,7 @@ data/generated/services.json
 
 详细说明见 [配置文件说明](docs/configuration.md)。
 
-`config.yaml` 可能包含商业授权下载地址、后台 token、证书路径等本机信息，默认不会提交。离线数据库和缓存也不会提交，包括 `data/raw`、`data/generated`、`data/cache`、`dist`、本机 `ipasn` 可执行文件和 zip 归档。
+`config.yaml` 可能包含商业授权下载地址、后台 token、证书路径等本机信息，默认不会提交。仓库提交了一份初始化离线库，`data/raw` 和 `data/generated` 通过 Git LFS 管理；克隆源码后先执行 `git lfs pull`，即可直接使用随仓库带的离线数据。后台更新只更新本机 `data` 文件，不会自动提交到 GitHub。运行缓存、评估输出、构建产物和本机可执行文件不会提交，包括 `data/cache`、`data/evaluation`、`dist`、本机 `ipasn` 可执行文件和 zip 归档。
 
 ## 编译和服务安装
 
@@ -218,6 +218,8 @@ data/generated/services.json
 ```bash
 ./scripts/build-release.sh
 ```
+
+推送到 `main` 后，GitHub Actions 会自动运行测试、创建 `vYYYY.MM.DD-短SHA` tag，并发布 Linux、Windows、macOS 的单文件可执行程序。Release 资产包含 `SHA256SUMS.txt` 校验和。
 
 安装为 Linux / Windows 服务：
 

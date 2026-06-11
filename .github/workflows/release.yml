@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Test, build and release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Prepare version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          short_sha="${GITHUB_SHA::7}"
+          tag="v$(date -u +'%Y.%m.%d')-${short_sha}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${tag} already exists; release creation will be skipped."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build single-file executables
+        if: steps.version.outputs.exists != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tag="${{ steps.version.outputs.tag }}"
+          version="${tag#v}"
+          ldflags="-s -w"
+
+          build_one() {
+            local goos="$1"
+            local goarch="$2"
+            local ext=""
+            if [ "$goos" = "windows" ]; then
+              ext=".exe"
+            fi
+            local output="dist/ipasn-${version}-${goos}-${goarch}${ext}"
+            echo "building ${output}"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags "$ldflags" -o "$output" ./cmd/ipasn
+          }
+
+          build_one linux amd64
+          build_one linux arm64
+          build_one windows amd64
+          build_one windows arm64
+          build_one darwin amd64
+          build_one darwin arm64
+
+          (cd dist && sha256sum * > SHA256SUMS.txt)
+
+      - name: Create tag
+        if: steps.version.outputs.exists != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "Release $tag"
+          git push origin "$tag"
+
+      - name: Create GitHub Release
+        if: steps.version.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          cat > release-notes.md <<EOF
+          Automated release for ${tag}.
+
+          Commit: ${GITHUB_SHA}
+
+          Assets are static single-file executables for Linux, Windows, and macOS. Verify downloads with SHA256SUMS.txt.
+          EOF
+          gh release create "$tag" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "IPASN ${tag}" \
+            --notes-file release-notes.md

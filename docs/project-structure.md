@@ -6,6 +6,7 @@
 
 ```text
 README.md
+.github/workflows/release.yml
 config.yaml
 config.yaml.example
 go.mod
@@ -14,6 +15,7 @@ ipasn
 ```
 
 - `README.md`：项目入口说明，放快速运行、接口、数据来源和常用命令。
+- `.github/workflows/release.yml`：GitHub Actions 自动发布配置，推送到 `main` 后测试、打 tag、上传多平台单文件可执行程序。
 - `config.yaml`：本机正式配置文件，包含端口、数据源、SSL、AI、IP库等配置。本文件可能包含授权地址，已放入忽略规则。
 - `config.yaml.example`：配置模板，用于部署时复制和修改。
 - `go.mod` / `go.sum`：Go 依赖清单。
@@ -73,7 +75,7 @@ data/cache
 - `data/processed`：解析后生成的索引状态和清单。
 - `data/cache`：运行时缓存，当前主要是 `data/cache/enrich`。
 
-`data/cache` 可以删除，服务会重新生成。`data/raw` 体积较大，生产部署时建议保留，避免每次重新下载。
+仓库提交了一份初始化离线库：`data/raw`、`data/generated`、`data/processed`。其中 `data/raw` 和 `data/generated` 通过 Git LFS 管理，克隆后需要 `git lfs pull` 才能拿到真实数据文件。`data/cache` 可以删除，服务会重新生成；后台更新只更新本机数据文件，不会自动提交到 GitHub。
 
 ## rules
 
@@ -127,6 +129,8 @@ dist/ipasn-windows-amd64.exe
 
 ```text
 data/cache
+data/evaluation
+data/raw/bgp
 dist
 ipasn
 ```

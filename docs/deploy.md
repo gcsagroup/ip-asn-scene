@@ -43,9 +43,41 @@ dist/ipasn-windows-amd64.exe
 
 `ipasn` 是本机 macOS 测试用文件，`dist` 目录里的 Linux 和 Windows 文件可以直接部署。
 
+## GitHub 自动发布
+
+仓库已配置 `.github/workflows/release.yml`。以后每次推送到 `main`：
+
+1. 运行 `go test ./...`。
+2. 交叉编译 Linux、Windows、macOS 的单文件可执行程序。
+3. 自动创建 `vYYYY.MM.DD-短SHA` tag。
+4. 自动创建 GitHub Release，并上传：
+
+```text
+ipasn-<version>-linux-amd64
+ipasn-<version>-linux-arm64
+ipasn-<version>-windows-amd64.exe
+ipasn-<version>-windows-arm64.exe
+ipasn-<version>-darwin-amd64
+ipasn-<version>-darwin-arm64
+SHA256SUMS.txt
+```
+
+如果同一 commit 的 tag 已存在，工作流会跳过重复发布。
+
+## 从源码克隆运行
+
+仓库提交了一份初始化离线库，其中超过 GitHub 普通文件限制的大文件使用 Git LFS 管理。首次克隆后执行：
+
+```bash
+git lfs install
+git lfs pull
+```
+
+之后可以直接启动服务。后台更新只会更新当前机器上的 `data` 文件，不会自动提交或推送到 GitHub。
+
 ## 首次准备数据库
 
-把 `config.yaml.example` 复制为 `config.yaml`，填入授权下载地址后执行：
+如果要换成自己的授权库或重新拉取最新离线数据，把 `config.yaml.example` 复制为 `config.yaml`，填入授权下载地址后执行：
 
 ```bash
 ./ipasn -config config.yaml -download-only
