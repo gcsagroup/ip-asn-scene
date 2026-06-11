@@ -1,0 +1,201 @@
+{
+  "version": "2026-05-20",
+  "rules": [
+    {
+      "id": "dns-google-public",
+      "name": "Google Public DNS",
+      "scene": "DNS",
+      "scene_name": "域名解析",
+      "confidence": 0.99,
+      "prefixes": [
+        "8.8.8.8/32",
+        "8.8.4.4/32",
+        "2001:4860:4860::8888/128",
+        "2001:4860:4860::8844/128"
+      ],
+      "rdns_contains": [
+        "dns.google"
+      ]
+    },
+    {
+      "id": "dns-cloudflare-public",
+      "name": "Cloudflare Public DNS",
+      "scene": "DNS",
+      "scene_name": "域名解析",
+      "confidence": 0.99,
+      "prefixes": [
+        "1.1.1.1/32",
+        "1.0.0.1/32",
+        "1.1.1.2/32",
+        "1.0.0.2/32",
+        "1.1.1.3/32",
+        "1.0.0.3/32",
+        "2606:4700:4700::1111/128",
+        "2606:4700:4700::1001/128",
+        "2606:4700:4700::1112/128",
+        "2606:4700:4700::1002/128",
+        "2606:4700:4700::1113/128",
+        "2606:4700:4700::1003/128"
+      ]
+    },
+    {
+      "id": "dns-quad9",
+      "name": "Quad9 Public DNS",
+      "scene": "DNS",
+      "scene_name": "域名解析",
+      "confidence": 0.99,
+      "prefixes": [
+        "9.9.9.9/32",
+        "149.112.112.112/32",
+        "9.9.9.10/32",
+        "149.112.112.10/32",
+        "9.9.9.11/32",
+        "149.112.112.11/32",
+        "2620:fe::fe/128",
+        "2620:fe::9/128",
+        "2620:fe::10/128",
+        "2620:fe::fe:10/128",
+        "2620:fe::11/128",
+        "2620:fe::fe:11/128"
+      ],
+      "rdns_contains": [
+        "quad9"
+      ]
+    },
+    {
+      "id": "dns-opendns",
+      "name": "OpenDNS",
+      "scene": "DNS",
+      "scene_name": "域名解析",
+      "confidence": 0.99,
+      "prefixes": [
+        "208.67.222.222/32",
+        "208.67.220.220/32",
+        "208.67.222.220/32",
+        "208.67.220.222/32",
+        "2620:119:35::35/128",
+        "2620:119:53::53/128"
+      ],
+      "rdns_contains": [
+        "opendns"
+      ]
+    },
+    {
+      "id": "dns-114dns",
+      "name": "114DNS",
+      "scene": "DNS",
+      "scene_name": "域名解析",
+      "confidence": 0.99,
+      "prefixes": [
+        "114.114.114.114/32",
+        "114.114.115.115/32",
+        "114.114.114.119/32",
+        "114.114.115.119/32"
+      ],
+      "rdns_contains": [
+        "114dns.com"
+      ]
+    },
+    {
+      "id": "dns-cn-public",
+      "name": "China Public DNS",
+      "scene": "DNS",
+      "scene_name": "域名解析",
+      "confidence": 0.99,
+      "prefixes": [
+        "223.5.5.5/32",
+        "223.6.6.6/32",
+        "119.29.29.29/32",
+        "182.254.116.116/32",
+        "180.76.76.76/32",
+        "1.2.4.8/32",
+        "210.2.4.8/32"
+      ]
+    },
+    {
+      "id": "dns-cleanbrowsing",
+      "name": "CleanBrowsing DNS",
+      "scene": "DNS",
+      "scene_name": "域名解析",
+      "confidence": 0.99,
+      "prefixes": [
+        "185.228.168.168/32",
+        "185.228.169.168/32",
+        "185.228.168.9/32",
+        "185.228.169.9/32",
+        "185.228.168.10/32",
+        "185.228.169.11/32"
+      ]
+    },
+    {
+      "id": "stun-google",
+      "name": "Google STUN",
+      "scene": "STUN",
+      "scene_name": "NAT 穿透",
+      "confidence": 0.99,
+      "prefixes": [
+        "74.125.250.129/32"
+      ],
+      "rdns_contains": [
+        "stun.l.google.com",
+        "stun1.l.google.com",
+        "stun2.l.google.com",
+        "stun3.l.google.com",
+        "stun4.l.google.com"
+      ]
+    },
+    {
+      "id": "stun-cloudflare",
+      "name": "Cloudflare STUN",
+      "scene": "STUN",
+      "scene_name": "NAT 穿透",
+      "confidence": 0.99,
+      "prefixes": [
+        "162.159.207.0/32"
+      ],
+      "rdns_contains": [
+        "stun.cloudflare.com"
+      ]
+    },
+    {
+      "id": "stun-twilio",
+      "name": "Twilio STUN",
+      "scene": "STUN",
+      "scene_name": "NAT 穿透",
+      "confidence": 0.96,
+      "prefixes": [
+        "54.65.63.243/32"
+      ],
+      "rdns_contains": [
+        "global.stun.twilio.com"
+      ]
+    },
+    {
+      "id": "stun-nextcloud",
+      "name": "Nextcloud STUN",
+      "scene": "STUN",
+      "scene_name": "NAT 穿透",
+      "confidence": 0.96,
+      "prefixes": [
+        "46.225.95.169/32"
+      ],
+      "rdns_contains": [
+        "stun.nextcloud.com"
+      ]
+    },
+    {
+      "id": "org-wikimedia",
+      "name": "Wikimedia",
+      "scene": "ORG",
+      "scene_name": "组织机构",
+      "confidence": 0.94,
+      "prefixes": [
+        "91.198.174.0/24",
+        "2620:0:860::/46"
+      ],
+      "rdns_contains": [
+        "wikimedia.org"
+      ]
+    }
+  ]
+}

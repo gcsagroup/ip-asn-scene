@@ -1,0 +1,326 @@
+version: "2026-06-11"
+rules:
+  # Government / public sector.
+  - asn: 49
+    scene: GOV
+    name: NIST
+    country: US
+    confidence: 0.90
+    source: manual_seed
+    reason: US National Institute of Standards and Technology network
+  - asn: 297
+    scene: GOV
+    name: NASA
+    country: US
+    confidence: 0.90
+    source: manual_seed
+  - asn: 721
+    scene: GOV
+    name: US Department of Defense
+    country: US
+    confidence: 0.90
+    source: manual_seed
+  - asn: 5376
+    scene: GOV
+    name: US Department of Defense
+    country: US
+    confidence: 0.88
+    source: manual_seed
+  - asn: 27066
+    scene: GOV
+    name: NOAA
+    country: US
+    confidence: 0.88
+    source: manual_seed
+
+  # Research and education networks.
+  - asn: 4538
+    scene: EDU
+    name: CERNET
+    country: CN
+    confidence: 0.92
+    source: manual_nren
+  - asn: 23910
+    scene: EDU
+    name: CERNET2
+    country: CN
+    confidence: 0.92
+    source: manual_nren
+  - asn: 786
+    scene: EDU
+    name: Jisc / Janet
+    country: GB
+    confidence: 0.90
+    source: manual_nren
+  - asn: 20965
+    scene: EDU
+    name: GEANT
+    country: EU
+    confidence: 0.90
+    source: manual_nren
+  - asn: 680
+    scene: EDU
+    name: DFN
+    country: DE
+    confidence: 0.90
+    source: manual_nren
+  - asn: 2200
+    scene: EDU
+    name: RENATER
+    country: FR
+    confidence: 0.90
+    source: manual_nren
+  - asn: 137
+    scene: EDU
+    name: GARR
+    country: IT
+    confidence: 0.90
+    source: manual_nren
+  - asn: 766
+    scene: EDU
+    name: RedIRIS
+    country: ES
+    confidence: 0.90
+    source: manual_nren
+  - asn: 1103
+    scene: EDU
+    name: SURFnet
+    country: NL
+    confidence: 0.90
+    source: manual_nren
+  - asn: 2603
+    scene: EDU
+    name: NORDUnet
+    country: EU
+    confidence: 0.90
+    source: manual_nren
+  - asn: 7575
+    scene: EDU
+    name: AARNet
+    country: AU
+    confidence: 0.90
+    source: manual_nren
+  - asn: 6509
+    scene: EDU
+    name: CANARIE
+    country: CA
+    confidence: 0.90
+    source: manual_nren
+  - asn: 2907
+    scene: EDU
+    name: SINET
+    country: JP
+    confidence: 0.90
+    source: manual_nren
+  - asn: 17579
+    scene: EDU
+    name: KREONET
+    country: KR
+    confidence: 0.88
+    source: manual_nren
+  - asn: 1916
+    scene: EDU
+    name: RNP
+    country: BR
+    confidence: 0.90
+    source: manual_nren
+  - asn: 27750
+    scene: EDU
+    name: RedCLARA
+    country: LATAM
+    confidence: 0.88
+    source: manual_nren
+  - asn: 21320
+    scene: EDU
+    name: GEANT IAS
+    country: EU
+    confidence: 0.86
+    source: manual_nren
+
+  # Large content networks where explicit DNS/STUN/service IP rules still win.
+  - asn: 15169
+    scene: CDN
+    name: Google LLC
+    country: US
+    confidence: 0.84
+    source: manual_content_network
+
+  # Mobile operators. These are higher confidence than generic carrier keywords,
+  # but still lower than explicit service prefix rules.
+  - asn: 56048
+    scene: MOB
+    name: China Mobile
+    country: CN
+    confidence: 0.88
+    source: manual_mobile
+  - asn: 9808
+    scene: MOB
+    name: China Mobile
+    country: CN
+    confidence: 0.88
+    source: manual_mobile
+  - asn: 56044
+    scene: MOB
+    name: China Mobile
+    country: CN
+    confidence: 0.84
+    source: manual_mobile
+  - asn: 58453
+    scene: MOB
+    name: China Mobile International
+    country: HK
+    confidence: 0.86
+    source: manual_mobile
+  - asn: 21928
+    scene: MOB
+    name: T-Mobile USA
+    country: US
+    confidence: 0.88
+    source: manual_mobile
+  - asn: 20057
+    scene: MOB
+    name: AT&T Mobility
+    country: US
+    confidence: 0.88
+    source: manual_mobile
+  - asn: 22394
+    scene: MOB
+    name: Verizon Wireless
+    country: US
+    confidence: 0.88
+    source: manual_mobile
+  - asn: 6167
+    scene: MOB
+    name: Verizon Wireless
+    country: US
+    confidence: 0.86
+    source: manual_mobile
+  - asn: 25135
+    scene: MOB
+    name: Vodafone
+    country: GB
+    confidence: 0.84
+    source: manual_mobile
+  - asn: 9605
+    scene: MOB
+    name: NTT DOCOMO
+    country: JP
+    confidence: 0.86
+    source: manual_mobile
+  - asn: 2516
+    scene: MOB
+    name: KDDI
+    country: JP
+    confidence: 0.82
+    source: manual_mobile
+  - asn: 17676
+    scene: MOB
+    name: SoftBank
+    country: JP
+    confidence: 0.82
+    source: manual_mobile
+  - asn: 55836
+    scene: MOB
+    name: Reliance Jio
+    country: IN
+    confidence: 0.86
+    source: manual_mobile
+  - asn: 45609
+    scene: MOB
+    name: Bharti Airtel
+    country: IN
+    confidence: 0.84
+    source: manual_mobile
+  - asn: 9318
+    scene: MOB
+    name: SK Telecom
+    country: KR
+    confidence: 0.84
+    source: manual_mobile
+  - asn: 4766
+    scene: MOB
+    name: Korea Telecom
+    country: KR
+    confidence: 0.82
+    source: manual_mobile
+  - asn: 17858
+    scene: MOB
+    name: LG Uplus
+    country: KR
+    confidence: 0.82
+    source: manual_mobile
+  - asn: 7473
+    scene: MOB
+    name: Singtel
+    country: SG
+    confidence: 0.80
+    source: manual_mobile
+  - asn: 1221
+    scene: MOB
+    name: Telstra
+    country: AU
+    confidence: 0.78
+    source: manual_mobile
+
+  # Residential / broadband operators. These are weak because many operators
+  # mix residential, business, mobile and IDC networks under the same ASN.
+  - asn: 4134
+    scene: DYN
+    name: China Telecom
+    country: CN
+    confidence: 0.70
+    source: manual_broadband_weak
+  - asn: 4837
+    scene: DYN
+    name: China Unicom
+    country: CN
+    confidence: 0.70
+    source: manual_broadband_weak
+  - asn: 7922
+    scene: DYN
+    name: Comcast
+    country: US
+    confidence: 0.76
+    source: manual_broadband_weak
+  - asn: 20115
+    scene: DYN
+    name: Charter Communications
+    country: US
+    confidence: 0.76
+    source: manual_broadband_weak
+  - asn: 5650
+    scene: DYN
+    name: Frontier
+    country: US
+    confidence: 0.76
+    source: manual_broadband_weak
+  - asn: 22773
+    scene: DYN
+    name: Cox Communications
+    country: US
+    confidence: 0.76
+    source: manual_broadband_weak
+  - asn: 3320
+    scene: DYN
+    name: Deutsche Telekom
+    country: DE
+    confidence: 0.70
+    source: manual_broadband_weak
+  - asn: 2856
+    scene: DYN
+    name: British Telecom
+    country: GB
+    confidence: 0.70
+    source: manual_broadband_weak
+  - asn: 701
+    scene: DYN
+    name: Verizon
+    country: US
+    confidence: 0.68
+    source: manual_broadband_weak
+  - asn: 7018
+    scene: DYN
+    name: AT&T
+    country: US
+    confidence: 0.68
+    source: manual_broadband_weak

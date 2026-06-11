@@ -1,0 +1,135 @@
+addr: ":18080"
+data_dir: "data"
+rules_file: "rules/services.json"
+asn_rules_file: "rules/asn_scenes.yaml"
+update_interval_hours: 24
+http_timeout_seconds: 90
+
+tls:
+  enabled: false
+  cert_file: "certs/server.crt"
+  key_file: "certs/server.key"
+
+ai:
+  provider: "auto"
+  openai_api_key: ""
+  openai_model: "gpt-5.4-mini"
+  openai_base_url: "https://api.openai.com/v1/responses"
+  ollama_model: "qwen3:8b"
+  ollama_base_url: "http://localhost:11434"
+  confidence_cutoff: 0.7
+  timeout_seconds: 8
+  max_cache: 2048
+
+enrichment:
+  enabled: true
+  ttl_hours: 168
+  timeout_seconds: 8
+  async_on_miss: true
+  foreground_timeout_ms: 1500
+
+history:
+  snapshots: 4
+
+bgp:
+  enabled: true
+  mode: "full"
+  routeviews_enabled: true
+  ripe_ris_enabled: true
+  collectors:
+    - "all"
+  include_updates: false
+  history_snapshots: 7
+  refresh_hours: 8
+  max_parallel_downloads: 4
+  max_parallel_parse: 2
+  keep_raw: true
+  raw_retention_days: 30
+  summary_file: "data/generated/bgp-observations-full.jsonl.gz"
+  routeviews_base_url: "https://archive.routeviews.org/"
+  ripe_ris_base_url: "https://data.ris.ripe.net/"
+
+admin:
+  enabled: true
+  path: "/admin"
+  token: ""
+  local_only: true
+
+dynamic_rules:
+  enabled: true
+  file: "data/generated/services.json"
+  google_crawler_url: "https://developers.google.com/static/crawling/ipranges/common-crawlers.json"
+  bingbot_url: "https://www.bing.com/toolbox/bingbot.json"
+  tor_exit_url: "https://check.torproject.org/torbulkexitlist"
+  uptimerobot_ip_url: "https://cdn.uptimerobot.com/api/IPv4andIPv6.txt"
+  spamhaus_drop_v4_url: "https://www.spamhaus.org/drop/drop_v4.json"
+  spamhaus_drop_v6_url: "https://www.spamhaus.org/drop/drop_v6.json"
+  cloudflare_v4_url: "https://www.cloudflare.com/ips-v4"
+  cloudflare_v6_url: "https://www.cloudflare.com/ips-v6"
+  fastly_url: "https://api.fastly.com/public-ip-list"
+  aws_ip_ranges_url: "https://ip-ranges.amazonaws.com/ip-ranges.json"
+  google_cloud_ip_ranges_url: "https://www.gstatic.com/ipranges/cloud.json"
+  azure_service_tags_url: "https://www.microsoft.com/en-us/download/confirmation.aspx?id=56519"
+  oracle_ip_ranges_url: "https://docs.oracle.com/en-us/iaas/tools/public_ip_ranges.json"
+  github_meta_url: "https://api.github.com/meta"
+  mail_spf_domains:
+    - "_spf.google.com"
+    - "spf.protection.outlook.com"
+    - "sendgrid.net"
+    - "mailgun.org"
+    - "amazonses.com"
+    - "spf.mandrillapp.com"
+  ip2proxy:
+    enabled: true
+    package: "PX11"
+    token: ""
+    local_files: []
+    download_urls: []
+
+ip2region:
+  enabled: true
+  include_default: false
+  v4_file: "data/raw/ip2region_v4.xdb"
+  v6_file: "data/raw/ip2region_v6.xdb"
+  v4_version_url: "你的IPv4版本检查API"
+  v4_download_url: "你的IPv4全载下载API"
+  v6_version_url: "你的IPv6版本检查API"
+  v6_download_url: "你的IPv6全载下载API"
+
+sources:
+  caida_v4_log_url: "https://data.caida.org/datasets/routing/routeviews-prefix2as/pfx2as-creation.log"
+  caida_v4_base_url: "https://data.caida.org/datasets/routing/routeviews-prefix2as/"
+  caida_v6_log_url: "https://data.caida.org/datasets/routing/routeviews6-prefix2as/pfx2as-creation.log"
+  caida_v6_base_url: "https://data.caida.org/datasets/routing/routeviews6-prefix2as/"
+  peeringdb_url: "https://www.peeringdb.com/api/net?fields=asn,name,aka,info_type,website"
+  peeringdb_ix_url: "https://www.peeringdb.com/api/ix?fields=id,name,country,city"
+  peeringdb_netixlan_url: "https://www.peeringdb.com/api/netixlan?fields=asn,ix_id,name,ipaddr4,ipaddr6,speed"
+  peeringdb_facility_url: "https://www.peeringdb.com/api/fac?fields=id,name,country,city"
+  peeringdb_netfac_url: "https://www.peeringdb.com/api/netfac?fields=local_asn,fac_id"
+  rir_urls:
+    afrinic: "https://ftp.afrinic.net/pub/stats/afrinic/delegated-afrinic-extended-latest"
+    apnic: "https://ftp.apnic.net/stats/apnic/delegated-apnic-extended-latest"
+    arin: "https://ftp.arin.net/pub/stats/arin/delegated-arin-extended-latest"
+    lacnic: "https://ftp.lacnic.net/pub/stats/lacnic/delegated-lacnic-extended-latest"
+    ripencc: "https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-extended-latest"
+  iana_rdap_urls:
+    asn: "https://data.iana.org/rdap/asn.json"
+    ipv4: "https://data.iana.org/rdap/ipv4.json"
+    ipv6: "https://data.iana.org/rdap/ipv6.json"
+  # 可选：Routinator / rpki-client / FORT 导出的 VRP CSV。
+  rpki_vrp_urls:
+    - "https://console.rpki-client.org/vrps.csv"
+  # 可选：IRR RPSL route/route6 dump。当前默认只放 HTTP(S) 可下载源；RADb 官方主要提供 FTP dump，可手动转存到 data/raw/irr-routes*。
+  irr_route_urls:
+    - "https://ftp.ripe.net/ripe/dbase/split/ripe.db.route.gz"
+    - "https://ftp.ripe.net/ripe/dbase/split/ripe.db.route6.gz"
+    - "https://ftp.ripe.net/ripe/dbase/split/ripe-nonauth.db.route.gz"
+    - "https://ftp.ripe.net/ripe/dbase/split/ripe-nonauth.db.route6.gz"
+    - "https://ftp.apnic.net/apnic/whois/apnic.db.route.gz"
+    - "https://ftp.apnic.net/apnic/whois/apnic.db.route6.gz"
+    - "https://ftp.afrinic.net/dbase/afrinic.db.gz"
+  # 可选：预处理后的 RouteViews / RIPE RIS 多观察点摘要，JSONL 或 CSV。全量 BGP 模式会生成本地摘要，通常无需填写。
+  bgp_observation_urls: []
+  # 可选：RFC 8805 geofeed 文件。OpenGeoFeed 是第三方聚合源，适合增强实际所在地判断。
+  geofeed_urls:
+    - "https://opengeofeed.org/feed/public.csv"

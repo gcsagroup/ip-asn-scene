@@ -1,0 +1,15 @@
+config.yaml
+data/
+cache/
+dist/
+/ipasn
+/ipasn-*
+/ipasn.zip
+*.zip
+page-check.png
+*.log
+*.tmp
+certs/*.key
+certs/*.crt
+.DS_Store
+coverage.out
