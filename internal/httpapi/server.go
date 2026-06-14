@@ -1267,7 +1267,7 @@ const adminHTML = `<!doctype html>
           <tr><th>Cloudflare IPv4</th><td><input id="cfg-cloudflare-v4-url" data-path="dynamic_rules.cloudflare_v4_url"></td></tr>
           <tr><th>Cloudflare IPv6</th><td><input id="cfg-cloudflare-v6-url" data-path="dynamic_rules.cloudflare_v6_url"></td></tr>
           <tr><th>Fastly URL</th><td><input id="cfg-fastly-url" data-path="dynamic_rules.fastly_url"></td></tr>
-          <tr><th>AWS IP Ranges</th><td><input id="cfg-aws-ip-ranges-url" data-path="dynamic_rules.aws_ip_ranges_url"></td></tr>
+          <tr><th>AWS IP Ranges</th><td><input id="cfg-aws-ip-ranges-url" data-path="dynamic_rules.aws_ip_ranges_url"><div class="field-help">AWS 总体生成 IDC 规则，CLOUDFRONT service 会单独拆成 CDN 规则。</div></td></tr>
           <tr><th>Google Cloud IP Ranges</th><td><input id="cfg-google-cloud-ip-ranges-url" data-path="dynamic_rules.google_cloud_ip_ranges_url"></td></tr>
           <tr><th>Azure Service Tags</th><td><input id="cfg-azure-service-tags-url" data-path="dynamic_rules.azure_service_tags_url"></td></tr>
           <tr><th>Oracle IP Ranges</th><td><input id="cfg-oracle-ip-ranges-url" data-path="dynamic_rules.oracle_ip_ranges_url"></td></tr>
@@ -1303,7 +1303,7 @@ const adminHTML = `<!doctype html>
           <tr><th>RPKI VRP URLs <span class="optional-source">可选增强源</span></th><td><textarea id="cfg-rpki-vrp-urls" data-path="sources.rpki_vrp_urls" data-type="list" placeholder="未配置时只加载 data/raw/rpki-vrps*.csv"></textarea><div class="field-help">已预置 rpki-client 公共 CSV。生产环境也可以换成本机 Routinator /csv、rpki-client 导出的 CSV，或 FORT 导出的 VRP CSV。</div></td></tr>
           <tr><th>IRR Route URLs <span class="optional-source">可选增强源</span></th><td><textarea id="cfg-irr-route-urls" data-path="sources.irr_route_urls" data-type="list" placeholder="未配置时只加载 data/raw/irr-routes*"></textarea><div class="field-help">已预置 RIPE、RIPE-NONAUTH、APNIC、AFRINIC 的 HTTP(S) route/route6 dump。RADb 官方主要提供 FTP dump，当前下载器不直接写入默认值。</div></td></tr>
           <tr><th>BGP Observation URLs <span class="optional-source">可选增强源</span></th><td><textarea id="cfg-bgp-observation-urls" data-path="sources.bgp_observation_urls" data-type="list" placeholder="全量 BGP 模式自动生成，通常无需填写"></textarea><div class="field-help">全量 BGP 模式会生成本地摘要 data/generated/bgp-observations-full.jsonl.gz。这里仅用于你另有 HTTP(S) 预处理摘要时补充。</div></td></tr>
-          <tr><th>Geofeed URLs <span class="optional-source">可选增强源</span></th><td><textarea id="cfg-geofeed-urls" data-path="sources.geofeed_urls" data-type="list" placeholder="未配置时只加载 data/raw/geofeed*"></textarea><div class="field-help">已预置 OpenGeoFeed 聚合源，适合增强实际所在地判断；它是第三方聚合源，不作为权威注册依据。</div></td></tr>
+          <tr><th>Geofeed URLs <span class="optional-source">可选增强源</span></th><td><textarea id="cfg-geofeed-urls" data-path="sources.geofeed_urls" data-type="list" placeholder="未配置时只加载 data/raw/geofeed*"></textarea><div class="field-help">已预置 OpenGeoFeed 聚合源，适合增强实际所在地判断；查询所在地时优先匹配 geofeed，未命中再回退 ip2region。</div></td></tr>
         </tbody>
       </table>
     </details>

@@ -1,0 +1,74 @@
+addr: ":18080"
+data_dir: "data"
+rules_file: "rules/services.json"
+asn_rules_file: "rules/asn_scenes.yaml"
+
+dynamic_rules:
+  enabled: true
+  file: "data/generated/services.json"
+
+ip2region:
+  enabled: true
+  include_default: false
+  v4_file: "data/raw/ip2region_v4.xdb"
+  v6_file: "data/raw/ip2region_v6.xdb"
+
+firewall_lists:
+  enabled: true
+  output_dir: "data/generated/firewall"
+  # 空列表表示生成 ip2region 里出现的所有国家/地区。
+  countries: []
+  # 这里使用项目内部识别的规范化公司标识，输出文件形如 company-aws.cidr。
+  companies:
+    - "aws"
+    - "azure"
+    - "google"
+    - "alibaba"
+    - "tencent"
+    - "huawei"
+    - "oracle"
+    - "ibm"
+    - "digitalocean"
+    - "linode"
+    - "ovhcloud"
+    - "hetzner"
+    - "vultr"
+    - "upcloud"
+    - "scaleway"
+    - "ionos"
+    - "gcore"
+    - "leaseweb"
+    - "rackspace"
+    - "equinix"
+    - "baidu"
+    - "jdcloud"
+    - "volcengine"
+    - "ucloud"
+    - "kingsoft"
+    - "qiniu"
+    - "qingcloud"
+    - "ctyun"
+    - "ecloud"
+    - "chinaunicom"
+    - "cloudflare"
+    - "akamai"
+    - "fastly"
+    - "cdn77"
+    - "bunny"
+    - "imperva"
+    - "cachefly"
+    - "cdnetworks"
+    - "chinacache"
+    - "wangsu"
+    - "baishan"
+    - "wasabi"
+    - "backblaze"
+    - "cloudsigma"
+    - "contabo"
+  scenes:
+    - "CDN"
+    - "IDC"
+  min_confidence: 0.8
+  include_ipv4: true
+  include_ipv6: true
+  write_entries: false

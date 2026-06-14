@@ -67,6 +67,7 @@ dynamic_rules:
   cloudflare_v4_url: "https://www.cloudflare.com/ips-v4"
   cloudflare_v6_url: "https://www.cloudflare.com/ips-v6"
   fastly_url: "https://api.fastly.com/public-ip-list"
+  # AWS 官方 IP 段会生成 AWS IDC 规则，并把 CLOUDFRONT service 单独拆成 CDN 规则。
   aws_ip_ranges_url: "https://ip-ranges.amazonaws.com/ip-ranges.json"
   google_cloud_ip_ranges_url: "https://www.gstatic.com/ipranges/cloud.json"
   azure_service_tags_url: "https://www.microsoft.com/en-us/download/confirmation.aspx?id=56519"
@@ -95,6 +96,30 @@ ip2region:
   v4_download_url: "你的IPv4全载下载API"
   v6_version_url: "你的IPv6版本检查API"
   v6_download_url: "你的IPv6全载下载API"
+
+firewall_lists:
+  enabled: true
+  output_dir: "data/generated/firewall"
+  # 空 countries 表示按 ip2region 里出现的所有国家/地区生成 country-XX.cidr。
+  countries: []
+  # 公司列表需要显式配置，避免全量 ASN/ISP 生成过多 company 文件。
+  companies:
+    - "alibaba"
+    - "tencent"
+    - "cloudflare"
+    - "google"
+    - "aws"
+    - "azure"
+  scenes:
+    - "IDC"
+    - "CDN"
+    - "TOR"
+    - "PROXY"
+    - "BLOCKLIST"
+  min_confidence: 0.8
+  include_ipv4: true
+  include_ipv6: true
+  write_entries: false
 
 sources:
   caida_v4_log_url: "https://data.caida.org/datasets/routing/routeviews-prefix2as/pfx2as-creation.log"
@@ -130,6 +155,6 @@ sources:
     - "https://ftp.afrinic.net/dbase/afrinic.db.gz"
   # 可选：预处理后的 RouteViews / RIPE RIS 多观察点摘要，JSONL 或 CSV。全量 BGP 模式会生成本地摘要，通常无需填写。
   bgp_observation_urls: []
-  # 可选：RFC 8805 geofeed 文件。OpenGeoFeed 是第三方聚合源，适合增强实际所在地判断。
+  # 可选：RFC 8805 geofeed 文件。查询所在地时优先匹配 geofeed，未命中再回退 ip2region。
   geofeed_urls:
     - "https://opengeofeed.org/feed/public.csv"

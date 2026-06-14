@@ -362,6 +362,7 @@ func (s *Service) lookupIP(ctx context.Context, snapshot *store.Snapshot, query 
 	s.attachGeoConsistency(&result)
 	s.attachEgress(snapshot, &result)
 	applyEnhancedUsage(&result)
+	applyWeightedSourceDecision(&result)
 	normalizeEgressForUsage(&result)
 	appendEgressEvidence(&result)
 	attachRoutingReliability(snapshot, &result)
@@ -470,6 +471,7 @@ func (s *Service) lookupAllocationFallback(ctx context.Context, snapshot *store.
 	s.attachGeoConsistency(&result)
 	s.attachEgress(snapshot, &result)
 	applyEnhancedUsage(&result)
+	applyWeightedSourceDecision(&result)
 	normalizeEgressForUsage(&result)
 	appendEgressEvidence(&result)
 	attachRoutingReliability(snapshot, &result)
@@ -915,6 +917,84 @@ func applyEnhancedUsage(result *Result) {
 			result.InferredScene,
 			result.InferredSceneName,
 		),
+	})
+}
+
+type weightedSceneVote struct {
+	scene      string
+	sceneName  string
+	score      float64
+	confidence float64
+	sources    []string
+}
+
+func applyWeightedSourceDecision(result *Result) {
+	if result == nil || result.QueryType != "ip" {
+		return
+	}
+	votes := map[string]*weightedSceneVote{}
+	add := func(scene, sceneName, source string, confidence, weight float64) {
+		scene = strings.ToUpper(strings.TrimSpace(scene))
+		if scene == "" || confidence <= 0 || weight <= 0 {
+			return
+		}
+		vote := votes[scene]
+		if vote == nil {
+			vote = &weightedSceneVote{scene: scene, sceneName: firstNonEmpty(sceneName, usageSceneName(scene))}
+			votes[scene] = vote
+		}
+		vote.score += confidence * weight
+		if confidence > vote.confidence {
+			vote.confidence = confidence
+		}
+		vote.sources = appendStringUnique(vote.sources, source)
+	}
+
+	add(result.Scene, result.SceneName, "主场景规则", result.Confidence, 1.0)
+	if result.Registration != nil && result.Registration.InferredScene != "" {
+		add(result.Registration.InferredScene, result.Registration.InferredSceneName, "RDAP/WHOIS", result.Registration.InferredConfidence, 0.75)
+	}
+	if candidate, ok := egressUsageCandidate(result.Egress); ok {
+		add(candidate.scene, candidate.sceneName, candidate.source, candidate.confidence, 0.65)
+	}
+	if result.AI != nil && result.AI.Used && result.InferredScene != "" {
+		add(result.InferredScene, result.InferredSceneName, "AI", result.AI.Confidence, 0.7)
+	}
+
+	current := votes[strings.ToUpper(result.Scene)]
+	var best *weightedSceneVote
+	for _, vote := range votes {
+		if best == nil || vote.score > best.score {
+			best = vote
+		}
+	}
+	if best == nil || best.scene == result.Scene || len(best.sources) < 2 {
+		return
+	}
+	currentScore := 0.0
+	if current != nil {
+		currentScore = current.score
+	}
+	if best.confidence < 0.78 || best.score < currentScore+0.18 {
+		return
+	}
+
+	confidence := best.confidence
+	if len(best.sources) >= 2 {
+		confidence += 0.04
+	}
+	if confidence > 0.95 {
+		confidence = 0.95
+	}
+	result.Scene = best.scene
+	result.SceneName = best.sceneName
+	result.Confidence = confidence
+	result.InferredScene = best.scene
+	result.InferredSceneName = best.sceneName
+	result.InferredConfidence = confidence
+	result.InferredSource = "多源投票"
+	result.Evidence = appendEvidenceUnique(result.Evidence, []string{
+		fmt.Sprintf("多源投票修正用途：%s -> %s %s", strings.Join(best.sources, "/"), best.scene, best.sceneName),
 	})
 }
 

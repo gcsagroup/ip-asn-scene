@@ -201,7 +201,8 @@ dynamic_rules:
 - `file`：自动生成规则保存位置。
 - `cloudflare_v4_url` / `cloudflare_v6_url`：Cloudflare 官方 CDN IP 段，生成 `CDN` 规则。
 - `fastly_url`：Fastly 官方 public IP list，生成 `CDN` 规则。
-- `aws_ip_ranges_url`、`google_cloud_ip_ranges_url`、`azure_service_tags_url`、`oracle_ip_ranges_url`：云厂商官方 IP 段，生成 `IDC` 规则。
+- `aws_ip_ranges_url`：AWS 官方 IP 段，生成 AWS 总体 `IDC` 规则，并把 `CLOUDFRONT` service 单独生成高置信度 `CDN` 规则。
+- `google_cloud_ip_ranges_url`、`azure_service_tags_url`、`oracle_ip_ranges_url`：云厂商官方 IP 段，生成 `IDC` 规则。
 - `github_meta_url`：GitHub 官方 Meta IP 段，生成 `ORG` 规则。
 - `mail_spf_domains`：邮件服务域名，程序会解析 SPF 生成邮件 IP 规则。
 - `ip2proxy.local_files`：本地 IP2Proxy 文件。
@@ -227,6 +228,49 @@ ip2region:
 - `v4_file` / `v6_file`：本地 xdb 文件。
 - `v4_version_url` / `v6_version_url`：版本检查地址。
 - `v4_download_url` / `v6_download_url`：全载下载地址，商业版可填授权后的全载链接。
+
+## 防火墙列表生成
+
+```yaml
+firewall_lists:
+  enabled: true
+  output_dir: "data/generated/firewall"
+  countries: []
+  companies: ["alibaba", "tencent", "cloudflare", "google", "aws", "azure"]
+  scenes: ["IDC", "CDN", "TOR", "PROXY", "BLOCKLIST"]
+  min_confidence: 0.8
+  include_ipv4: true
+  include_ipv6: true
+  write_entries: false
+```
+
+执行：
+
+```bash
+./ipasn -config config.yaml -generate-firewall-lists
+```
+
+- `output_dir`：输出目录。
+- `countries`：国家/地区代码列表，例如 `CN`、`US`、`SG`。为空表示按 ip2region 里出现的全部国家/地区生成 `country-XX.cidr`。
+- `companies`：要生成的公司列表。公司列表需要显式配置，避免按全量 ASN/ISP 生成过多文件。
+- `scenes`：要生成的场景列表，例如 `IDC`、`CDN`、`TOR`、`PROXY`。
+- `min_confidence`：低于该置信度的记录不会进入输出。
+- `include_ipv4` / `include_ipv6`：控制是否生成 IPv4 / IPv6 CIDR。默认两个都开启。
+- `write_entries`：是否输出 `entries.jsonl` 明细。默认关闭，需要审计每条命中来源时再开启。
+
+输出文件示例：
+
+```text
+data/generated/firewall/index.json
+data/generated/firewall/country-CN.cidr
+data/generated/firewall/company-alibaba.cidr
+data/generated/firewall/scene-IDC.cidr
+data/generated/firewall/scene-TOR.cidr
+```
+
+开启 `write_entries` 后会额外输出 `data/generated/firewall/entries.jsonl`。
+
+生成器会对同一个输出文件里的相邻/重叠网段做合并，最终文件包含 IPv4 和 IPv6 CIDR。地区列表主要来自 ip2region 全量库；公司和场景会结合 ip2region 的 `ISP` / `ASN` 字段、ASN 信息、离线服务规则和场景规则生成。`TOR` / `PROXY` 更依赖 Tor / IP2Proxy 等专用离线来源，ip2region 只补充所在地和 ASN 信息。
 
 ## 数据源
 
@@ -273,7 +317,7 @@ sources:
 - `rpki_vrp_urls`：Routinator、rpki-client 或 FORT 导出的 VRP CSV。默认使用 `rpki-client` 公共控制台 CSV；生产环境也可以换成本机 Routinator `/csv`。也可以手动放到 `data/raw/rpki-vrps*.csv`。
 - `irr_route_urls`：IRR RPSL dump，解析 `route` / `route6`、`origin`、`source`。默认预置 RIPE、RIPE-NONAUTH、APNIC、AFRINIC 的 HTTP(S) dump。RADb 官方主要提供 FTP dump，当前下载器不直接写入默认 URL，可手动转存到 `data/raw/irr-routes*`。
 - `bgp_observation_urls`：预处理后的 RouteViews / RIPE RIS 多观察点摘要，支持 JSONL 或 CSV。全量 BGP 模式会生成 `data/generated/bgp-observations-full.jsonl.gz`，通常无需填写这个字段；也可以手动放到 `data/raw/bgp-observations*`。
-- `geofeed_urls`：RFC 8805 geofeed 文件。默认使用 OpenGeoFeed 聚合源增强实际所在地判断；它是第三方聚合源，不作为权威注册依据。
+- `geofeed_urls`：RFC 8805 geofeed 文件。默认使用 OpenGeoFeed 聚合源增强实际所在地判断；它是第三方聚合源，不作为权威注册依据。更新后文件会保存到 `data/raw/geofeed*.csv`，查询所在地时优先匹配 geofeed，未命中再回退 ip2region。
 
 RPKI CSV 支持两种格式：
 

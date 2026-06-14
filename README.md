@@ -2,7 +2,7 @@
 
 输入 IP 或 ASN，返回 ASN、公司信息、匹配网段、路由状态、应用场景、判断依据和可选的 IP 所在地。
 
-当前项目是 Go 服务，README 是项目主要说明入口。仓库只保存源码、规则、脚本、配置模板和文档；离线数据库、运行缓存、本机配置和编译产物不进入 Git。
+当前项目是 Go 服务，README 是项目主要说明入口。仓库保存源码、规则、脚本、配置模板、文档和一份 Git LFS 管理的初始化离线库；运行缓存、本机配置和编译产物不进入 Git。
 
 ## 功能
 
@@ -43,6 +43,15 @@ go run ./cmd/ipasn -config config.yaml
 ```bash
 go run ./cmd/ipasn -config config.yaml -update-on-start
 ```
+
+生成防火墙 CIDR 列表：
+
+```bash
+go run ./cmd/ipasn -config config.yaml -generate-firewall-lists
+go run ./cmd/ipasn -config generate_firewall.yaml -generate-firewall-lists
+```
+
+默认会读取 ip2region IPv4/IPv6 全载库，结合 ASN、服务规则和本地离线索引，合并相邻/重叠网段后输出到 `data/generated/firewall`。
 
 所在地查询已在 `config.yaml` 里启用，需要默认显示时把 `include_default` 改成 `true`。
 
@@ -111,10 +120,12 @@ POST /api/admin/update
 - `rules/services.json`：手工维护的离线服务规则
 - `data/generated/services.json`：自动生成的动态服务规则
 - IP2Proxy：VPN、代理、Tor 增强判断
-- ip2region：IP 所在地
+- geofeed：RFC 8805 实际所在地增强，查询时优先于 ip2region
+- ip2region：IP 所在地和库内 ASN / ISP 补充
+- `data/generated/firewall`：按国家/地区、公司和场景生成的防火墙 CIDR 列表
 - OpenAI / Ollama：低置信度结果辅助判断
 
-查询结果中的 `egress` 会结合 RIPE RIS AS Path 主上游、PeeringDB IXP / Facility、IP 所在地和注册信息，给出机房/出口推断。它会优先按 IP 当前宣告地和所在地匹配机房/IXP；匹配不上时不输出外地机房，只保留主上游 `TRANSIT` 证据。家庭宽带、移动网络、教育/政府/组织机构，以及公共 DNS/CDN 等 Anycast 服务，会避免把主上游 PeeringDB 机房误当成用户、基站、校园或办公出口。低置信度场景会结合 RDAP / WHOIS 和机房/出口信息修正；高置信度命中会保留主规则，只把增强信息作为参考证据。
+查询结果中的 `egress` 会结合 RIPE RIS AS Path 主上游、PeeringDB IXP / Facility、IP 所在地和注册信息，给出机房/出口推断。它会优先按 IP 当前宣告地和所在地匹配机房/IXP；匹配不上时不输出外地机房，只保留主上游 `TRANSIT` 证据。家庭宽带、移动网络、教育/政府/组织机构，以及公共 DNS/CDN 等 Anycast 服务，会避免把主上游 PeeringDB 机房误当成用户、基站、校园或办公出口。低置信度场景会结合主规则、RDAP / WHOIS、AI 和机房/出口信息做加权投票修正；高置信度命中会保留主规则，只把增强信息作为参考证据。
 
 查询结果中的 `routing_security` 会结合 RPKI、IRR 和 BGP 多观察点摘要判断路由可靠性；`data_quality` 会给出综合质量评分；`warnings` 会提示 RPKI Invalid、IRR 冲突、MOAS 等风险。
 
@@ -196,7 +207,7 @@ data/generated/services.json
 - `MAIL`：常见邮件服务 SPF 记录
 - `MON`：UptimeRobot 监控 IP
 - `BLOCKLIST`：Spamhaus DROP
-- `CDN`：Cloudflare、Fastly 官方 IP 段
+- `CDN`：Cloudflare、Fastly、AWS CloudFront 官方 IP 段
 - `IDC`：AWS、Google Cloud、Azure、Oracle Cloud 官方 IP 段
 - `ORG`：GitHub 官方 Meta IP 段
 - `VPN` / `PROXY` / `TOR`：IP2Proxy 离线库

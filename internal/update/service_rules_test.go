@@ -94,7 +94,7 @@ func TestRefreshDynamicServiceRulesBuildsGeneratedFile(t *testing.T) {
 		_, _ = w.Write([]byte(`{"addresses":["151.101.0.0/16"],"ipv6_addresses":["2a04:4e42::/32"]}`))
 	})
 	mux.HandleFunc("/aws.json", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"prefixes":[{"ip_prefix":"15.230.15.29/32"}],"ipv6_prefixes":[{"ipv6_prefix":"2600:f0f0:70::/45"}]}`))
+		_, _ = w.Write([]byte(`{"prefixes":[{"ip_prefix":"15.230.15.29/32","service":"EC2"},{"ip_prefix":"205.251.192.0/19","service":"CLOUDFRONT"}],"ipv6_prefixes":[{"ipv6_prefix":"2600:f0f0:70::/45","service":"EC2"},{"ipv6_prefix":"2600:9000::/28","service":"CLOUDFRONT"}]}`))
 	})
 	mux.HandleFunc("/google-cloud.json", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"prefixes":[{"ipv4Prefix":"34.80.0.0/15"},{"ipv6Prefix":"2600:1900::/28"}]}`))
@@ -124,6 +124,7 @@ func TestRefreshDynamicServiceRulesBuildsGeneratedFile(t *testing.T) {
 	cfg.DynamicRules.GoogleCloudIPRangesURL = server.URL + "/google-cloud.json"
 	cfg.DynamicRules.OracleIPRangesURL = server.URL + "/oracle.json"
 	cfg.DynamicRules.AzureServiceTagsURL = server.URL + "/azure-tags.json"
+	cfg.DynamicRules.GitHubMetaURL = ""
 	cfg.DynamicRules.MailSPFDomains = []string{"_spf.example.test"}
 	cfg.DynamicRules.IP2Proxy.Enabled = true
 	cfg.DynamicRules.IP2Proxy.LocalFile = filepath.Join(cfg.DataDir, "ip2proxy.csv")
@@ -181,6 +182,7 @@ func TestRefreshDynamicServiceRulesBuildsGeneratedFile(t *testing.T) {
 		"dynamic-ip2proxy-tor":               "TOR",
 		"dynamic-cdn-cloudflare":             "CDN",
 		"dynamic-cdn-fastly":                 "CDN",
+		"dynamic-cdn-aws-cloudfront":         "CDN",
 		"dynamic-idc-aws":                    "IDC",
 		"dynamic-idc-google-cloud":           "IDC",
 		"dynamic-idc-azure":                  "IDC",
@@ -224,6 +226,12 @@ func TestRefreshDynamicServiceRulesBuildsGeneratedFile(t *testing.T) {
 	if !generatedRuleHasPrefix(file.Rules, "dynamic-idc-aws", "15.230.15.29/32") {
 		t.Fatalf("AWS rule did not include IPv4 prefix")
 	}
+	if !generatedRuleHasPrefix(file.Rules, "dynamic-cdn-aws-cloudfront", "205.251.192.0/19") {
+		t.Fatalf("AWS CloudFront rule did not include IPv4 prefix")
+	}
+	if !generatedRuleHasPrefix(file.Rules, "dynamic-cdn-aws-cloudfront", "2600:9000::/28") {
+		t.Fatalf("AWS CloudFront rule did not include IPv6 prefix")
+	}
 	if !generatedRuleHasPrefix(file.Rules, "dynamic-idc-azure", "13.107.42.0/24") {
 		t.Fatalf("Azure rule did not include service tag prefix")
 	}
@@ -254,6 +262,14 @@ func TestRefreshDynamicServiceRulesCombinesMultipleIP2ProxySources(t *testing.T)
 	cfg.DynamicRules.UptimeRobotURL = ""
 	cfg.DynamicRules.SpamhausDropV4URL = ""
 	cfg.DynamicRules.SpamhausDropV6URL = ""
+	cfg.DynamicRules.CloudflareV4URL = ""
+	cfg.DynamicRules.CloudflareV6URL = ""
+	cfg.DynamicRules.FastlyURL = ""
+	cfg.DynamicRules.AWSIPRangesURL = ""
+	cfg.DynamicRules.GoogleCloudIPRangesURL = ""
+	cfg.DynamicRules.AzureServiceTagsURL = ""
+	cfg.DynamicRules.OracleIPRangesURL = ""
+	cfg.DynamicRules.GitHubMetaURL = ""
 	cfg.DynamicRules.MailSPFDomains = nil
 	cfg.DynamicRules.IP2Proxy.Enabled = true
 	cfg.DynamicRules.IP2Proxy.DownloadURL = server.URL + "/ip2proxy.zip"
@@ -303,6 +319,14 @@ func TestRefreshDynamicServiceRulesRetainsPreviousRuleOnSourceFailure(t *testing
 	cfg.DynamicRules.UptimeRobotURL = ""
 	cfg.DynamicRules.SpamhausDropV4URL = ""
 	cfg.DynamicRules.SpamhausDropV6URL = ""
+	cfg.DynamicRules.CloudflareV4URL = ""
+	cfg.DynamicRules.CloudflareV6URL = ""
+	cfg.DynamicRules.FastlyURL = ""
+	cfg.DynamicRules.AWSIPRangesURL = ""
+	cfg.DynamicRules.GoogleCloudIPRangesURL = ""
+	cfg.DynamicRules.AzureServiceTagsURL = ""
+	cfg.DynamicRules.OracleIPRangesURL = ""
+	cfg.DynamicRules.GitHubMetaURL = ""
 	cfg.DynamicRules.MailSPFDomains = nil
 	cfg.DynamicRules.IP2Proxy.Enabled = false
 

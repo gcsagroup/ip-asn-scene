@@ -119,6 +119,8 @@ func RefreshDynamicServiceRulesWithClient(ctx context.Context, cfg config.Config
 	addRule("dynamic-cdn-fastly", rule, err)
 	rule, err = fetchCloudJSONRule(ctx, client, cfg.DynamicRules.AWSIPRangesURL, "dynamic-idc-aws", "AWS", "AWS 官方 ip-ranges.json")
 	addRule("dynamic-idc-aws", rule, err)
+	rule, err = fetchCloudJSONServiceRule(ctx, client, cfg.DynamicRules.AWSIPRangesURL, "dynamic-cdn-aws-cloudfront", "AWS CloudFront", "CDN", "内容分发", 0.99, "AWS 官方 ip-ranges.json CLOUDFRONT", "CLOUDFRONT")
+	addRule("dynamic-cdn-aws-cloudfront", rule, err)
 	rule, err = fetchCloudJSONRule(ctx, client, cfg.DynamicRules.GoogleCloudIPRangesURL, "dynamic-idc-google-cloud", "Google Cloud", "Google Cloud 官方 cloud.json")
 	addRule("dynamic-idc-google-cloud", rule, err)
 	rule, err = fetchAzureServiceTagsRule(ctx, client, cfg.DynamicRules.AzureServiceTagsURL)
@@ -251,6 +253,21 @@ func fetchCloudJSONRule(ctx context.Context, client *http.Client, url, id, name,
 		return generatedServiceRule{}, fmt.Errorf("%s: %w", name, err)
 	}
 	return newGeneratedServiceRule(id, name, "IDC", "数据中心", 0.97, prefixes, evidence), nil
+}
+
+func fetchCloudJSONServiceRule(ctx context.Context, client *http.Client, url, id, name, scene, sceneName string, confidence float64, evidence string, services ...string) (generatedServiceRule, error) {
+	if strings.TrimSpace(url) == "" {
+		return generatedServiceRule{}, nil
+	}
+	body, err := downloadBytes(ctx, client, url)
+	if err != nil {
+		return generatedServiceRule{}, fmt.Errorf("%s: %w", name, err)
+	}
+	prefixes, err := parseCloudJSONServicePrefixes(body, services...)
+	if err != nil {
+		return generatedServiceRule{}, fmt.Errorf("%s: %w", name, err)
+	}
+	return newGeneratedServiceRule(id, name, scene, sceneName, confidence, prefixes, evidence), nil
 }
 
 func fetchAzureServiceTagsRule(ctx context.Context, client *http.Client, url string) (generatedServiceRule, error) {
@@ -713,28 +730,50 @@ func parseFastlyPrefixes(body []byte) ([]string, error) {
 }
 
 func parseCloudJSONPrefixes(body []byte) ([]string, error) {
+	return parseCloudJSONServicePrefixes(body)
+}
+
+func parseCloudJSONServicePrefixes(body []byte, services ...string) ([]string, error) {
 	var payload struct {
 		Prefixes []struct {
 			IPPrefix    string `json:"ip_prefix"`
 			IPv4Prefix  string `json:"ipv4Prefix"`
 			IPv6Prefix  string `json:"ipv6_prefix"`
 			IPv6Prefix2 string `json:"ipv6Prefix"`
+			Service     string `json:"service"`
 		} `json:"prefixes"`
 		IPv6Prefixes []struct {
 			IPv6Prefix string `json:"ipv6_prefix"`
+			Service    string `json:"service"`
 		} `json:"ipv6_prefixes"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, err
 	}
+	serviceSet := map[string]bool{}
+	for _, service := range services {
+		service = strings.ToUpper(strings.TrimSpace(service))
+		if service != "" {
+			serviceSet[service] = true
+		}
+	}
+	includeService := func(service string) bool {
+		return len(serviceSet) == 0 || serviceSet[strings.ToUpper(strings.TrimSpace(service))]
+	}
 	out := []string{}
 	for _, prefix := range payload.Prefixes {
+		if !includeService(prefix.Service) {
+			continue
+		}
 		out = appendNormalizedPrefix(out, prefix.IPPrefix)
 		out = appendNormalizedPrefix(out, prefix.IPv4Prefix)
 		out = appendNormalizedPrefix(out, prefix.IPv6Prefix)
 		out = appendNormalizedPrefix(out, prefix.IPv6Prefix2)
 	}
 	for _, prefix := range payload.IPv6Prefixes {
+		if !includeService(prefix.Service) {
+			continue
+		}
 		out = appendNormalizedPrefix(out, prefix.IPv6Prefix)
 	}
 	return out, nil

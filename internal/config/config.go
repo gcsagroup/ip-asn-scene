@@ -26,6 +26,7 @@ type Config struct {
 	History        HistoryConfig
 	DynamicRules   DynamicRulesConfig
 	IP2Region      IP2RegionConfig
+	FirewallLists  FirewallListsConfig
 	BGP            BGPConfig
 	Admin          AdminConfig
 }
@@ -129,6 +130,18 @@ type IP2RegionConfig struct {
 	V6DownloadURL  string
 }
 
+type FirewallListsConfig struct {
+	Enabled       bool     `json:"enabled" yaml:"enabled"`
+	OutputDir     string   `json:"output_dir" yaml:"output_dir"`
+	Countries     []string `json:"countries" yaml:"countries"`
+	Companies     []string `json:"companies" yaml:"companies"`
+	Scenes        []string `json:"scenes" yaml:"scenes"`
+	MinConfidence float64  `json:"min_confidence" yaml:"min_confidence"`
+	IncludeIPv4   bool     `json:"include_ipv4" yaml:"include_ipv4"`
+	IncludeIPv6   bool     `json:"include_ipv6" yaml:"include_ipv6"`
+	WriteEntries  bool     `json:"write_entries" yaml:"write_entries"`
+}
+
 type Sources struct {
 	CAIDAv4LogURL           string
 	CAIDAv4BaseURL          string
@@ -148,21 +161,22 @@ type Sources struct {
 }
 
 type fileConfig struct {
-	Addr                string                 `yaml:"addr"`
-	DataDir             string                 `yaml:"data_dir"`
-	RulesFile           string                 `yaml:"rules_file"`
-	ASNRulesFile        string                 `yaml:"asn_rules_file"`
-	UpdateIntervalHours *int                   `yaml:"update_interval_hours"`
-	HTTPTimeoutSeconds  *int                   `yaml:"http_timeout_seconds"`
-	TLS                 fileTLSConfig          `yaml:"tls"`
-	AI                  fileAIConfig           `yaml:"ai"`
-	Enrichment          fileEnrichmentConfig   `yaml:"enrichment"`
-	History             fileHistoryConfig      `yaml:"history"`
-	DynamicRules        fileDynamicRulesConfig `yaml:"dynamic_rules"`
-	IP2Region           fileIP2RegionConfig    `yaml:"ip2region"`
-	BGP                 fileBGPConfig          `yaml:"bgp"`
-	Admin               fileAdminConfig        `yaml:"admin"`
-	Sources             fileSourcesConfig      `yaml:"sources"`
+	Addr                string                  `yaml:"addr"`
+	DataDir             string                  `yaml:"data_dir"`
+	RulesFile           string                  `yaml:"rules_file"`
+	ASNRulesFile        string                  `yaml:"asn_rules_file"`
+	UpdateIntervalHours *int                    `yaml:"update_interval_hours"`
+	HTTPTimeoutSeconds  *int                    `yaml:"http_timeout_seconds"`
+	TLS                 fileTLSConfig           `yaml:"tls"`
+	AI                  fileAIConfig            `yaml:"ai"`
+	Enrichment          fileEnrichmentConfig    `yaml:"enrichment"`
+	History             fileHistoryConfig       `yaml:"history"`
+	DynamicRules        fileDynamicRulesConfig  `yaml:"dynamic_rules"`
+	IP2Region           fileIP2RegionConfig     `yaml:"ip2region"`
+	FirewallLists       fileFirewallListsConfig `yaml:"firewall_lists"`
+	BGP                 fileBGPConfig           `yaml:"bgp"`
+	Admin               fileAdminConfig         `yaml:"admin"`
+	Sources             fileSourcesConfig       `yaml:"sources"`
 }
 
 type fileTLSConfig struct {
@@ -262,6 +276,18 @@ type fileIP2RegionConfig struct {
 	V4DownloadURL  string `yaml:"v4_download_url"`
 	V6VersionURL   string `yaml:"v6_version_url"`
 	V6DownloadURL  string `yaml:"v6_download_url"`
+}
+
+type fileFirewallListsConfig struct {
+	Enabled       *bool    `yaml:"enabled"`
+	OutputDir     string   `yaml:"output_dir"`
+	Countries     []string `yaml:"countries"`
+	Companies     []string `yaml:"companies"`
+	Scenes        []string `yaml:"scenes"`
+	MinConfidence *float64 `yaml:"min_confidence"`
+	IncludeIPv4   *bool    `yaml:"include_ipv4"`
+	IncludeIPv6   *bool    `yaml:"include_ipv6"`
+	WriteEntries  *bool    `yaml:"write_entries"`
 }
 
 type fileSourcesConfig struct {
@@ -366,6 +392,15 @@ func Default() Config {
 			IncludeDefault: false,
 			V4File:         "data/raw/ip2region_v4.xdb",
 			V6File:         "data/raw/ip2region_v6.xdb",
+		},
+		FirewallLists: FirewallListsConfig{
+			Enabled:       true,
+			OutputDir:     "data/generated/firewall",
+			Scenes:        []string{"IDC", "CDN", "TOR", "PROXY", "BLOCKLIST"},
+			MinConfidence: 0.8,
+			IncludeIPv4:   true,
+			IncludeIPv6:   true,
+			WriteEntries:  false,
 		},
 		Sources: Sources{
 			CAIDAv4LogURL:  "https://data.caida.org/datasets/routing/routeviews-prefix2as/pfx2as-creation.log",
@@ -536,6 +571,17 @@ func SaveToFile(path string, cfg Config) error {
 			V6VersionURL:   cfg.IP2Region.V6VersionURL,
 			V6DownloadURL:  cfg.IP2Region.V6DownloadURL,
 		},
+		FirewallLists: fileFirewallListsConfig{
+			Enabled:       boolPtr(cfg.FirewallLists.Enabled),
+			OutputDir:     cfg.FirewallLists.OutputDir,
+			Countries:     cfg.FirewallLists.Countries,
+			Companies:     cfg.FirewallLists.Companies,
+			Scenes:        cfg.FirewallLists.Scenes,
+			MinConfidence: floatPtr(cfg.FirewallLists.MinConfidence),
+			IncludeIPv4:   boolPtr(cfg.FirewallLists.IncludeIPv4),
+			IncludeIPv6:   boolPtr(cfg.FirewallLists.IncludeIPv6),
+			WriteEntries:  boolPtr(cfg.FirewallLists.WriteEntries),
+		},
 		Sources: fileSourcesConfig{
 			CAIDAv4LogURL:           cfg.Sources.CAIDAv4LogURL,
 			CAIDAv4BaseURL:          cfg.Sources.CAIDAv4BaseURL,
@@ -615,6 +661,7 @@ func applyConfigFile(cfg *Config, path string) error {
 	applyAdminFileConfig(&cfg.Admin, file.Admin)
 	applyDynamicRulesFileConfig(&cfg.DynamicRules, file.DynamicRules)
 	applyIP2RegionFileConfig(&cfg.IP2Region, file.IP2Region)
+	applyFirewallListsFileConfig(&cfg.FirewallLists, file.FirewallLists)
 	applySourcesFileConfig(&cfg.Sources, file.Sources)
 	return nil
 }
@@ -842,6 +889,37 @@ func applyIP2RegionFileConfig(cfg *IP2RegionConfig, file fileIP2RegionConfig) {
 	if file.V6DownloadURL != "" {
 		cfg.V6DownloadURL = file.V6DownloadURL
 	}
+}
+
+func applyFirewallListsFileConfig(cfg *FirewallListsConfig, file fileFirewallListsConfig) {
+	if file.Enabled != nil {
+		cfg.Enabled = *file.Enabled
+	}
+	if file.OutputDir != "" {
+		cfg.OutputDir = file.OutputDir
+	}
+	if len(file.Countries) > 0 {
+		cfg.Countries = cleanUpperStringSlice(file.Countries)
+	}
+	if len(file.Companies) > 0 {
+		cfg.Companies = cleanStringSlice(file.Companies)
+	}
+	if len(file.Scenes) > 0 {
+		cfg.Scenes = cleanUpperStringSlice(file.Scenes)
+	}
+	if file.MinConfidence != nil && *file.MinConfidence > 0 && *file.MinConfidence <= 1 {
+		cfg.MinConfidence = *file.MinConfidence
+	}
+	if file.IncludeIPv4 != nil {
+		cfg.IncludeIPv4 = *file.IncludeIPv4
+	}
+	if file.IncludeIPv6 != nil {
+		cfg.IncludeIPv6 = *file.IncludeIPv6
+	}
+	if file.WriteEntries != nil {
+		cfg.WriteEntries = *file.WriteEntries
+	}
+	normalizeFirewallListsConfig(cfg)
 }
 
 func applySourcesFileConfig(cfg *Sources, file fileSourcesConfig) {
@@ -1138,6 +1216,35 @@ func applyEnv(cfg *Config) {
 	if value := os.Getenv("IP2REGION_V6_DOWNLOAD_URL"); value != "" {
 		cfg.IP2Region.V6DownloadURL = value
 	}
+	if value := os.Getenv("FIREWALL_LISTS_ENABLED"); value != "" {
+		cfg.FirewallLists.Enabled = parseEnvBool(value)
+	}
+	if value := os.Getenv("FIREWALL_LISTS_OUTPUT_DIR"); value != "" {
+		cfg.FirewallLists.OutputDir = value
+	}
+	if value := os.Getenv("FIREWALL_LISTS_COUNTRIES"); value != "" {
+		cfg.FirewallLists.Countries = cleanUpperStringSlice(splitList(value))
+	}
+	if value := os.Getenv("FIREWALL_LISTS_COMPANIES"); value != "" {
+		cfg.FirewallLists.Companies = splitList(value)
+	}
+	if value := os.Getenv("FIREWALL_LISTS_SCENES"); value != "" {
+		cfg.FirewallLists.Scenes = cleanUpperStringSlice(splitList(value))
+	}
+	if value := os.Getenv("FIREWALL_LISTS_MIN_CONFIDENCE"); value != "" {
+		if parsed, err := strconv.ParseFloat(value, 64); err == nil && parsed > 0 && parsed <= 1 {
+			cfg.FirewallLists.MinConfidence = parsed
+		}
+	}
+	if value := os.Getenv("FIREWALL_LISTS_INCLUDE_IPV4"); value != "" {
+		cfg.FirewallLists.IncludeIPv4 = parseEnvBool(value)
+	}
+	if value := os.Getenv("FIREWALL_LISTS_INCLUDE_IPV6"); value != "" {
+		cfg.FirewallLists.IncludeIPv6 = parseEnvBool(value)
+	}
+	if value := os.Getenv("FIREWALL_LISTS_WRITE_ENTRIES"); value != "" {
+		cfg.FirewallLists.WriteEntries = parseEnvBool(value)
+	}
 	if value := os.Getenv("RPKI_VRP_URLS"); value != "" {
 		cfg.Sources.RPKIVRPURLs = splitList(value)
 	}
@@ -1152,6 +1259,7 @@ func applyEnv(cfg *Config) {
 	}
 	normalizeBGPConfig(&cfg.BGP)
 	normalizeAdminConfig(&cfg.Admin)
+	normalizeFirewallListsConfig(&cfg.FirewallLists)
 }
 
 func splitList(value string) []string {
@@ -1166,6 +1274,14 @@ func cleanStringSlice(parts []string) []string {
 		if part != "" {
 			out = append(out, part)
 		}
+	}
+	return out
+}
+
+func cleanUpperStringSlice(parts []string) []string {
+	out := cleanStringSlice(parts)
+	for i := range out {
+		out[i] = strings.ToUpper(out[i])
 	}
 	return out
 }
@@ -1210,6 +1326,26 @@ func normalizeAdminConfig(cfg *AdminConfig) {
 	if !strings.HasPrefix(cfg.Path, "/") {
 		cfg.Path = "/" + cfg.Path
 	}
+}
+
+func normalizeFirewallListsConfig(cfg *FirewallListsConfig) {
+	if strings.TrimSpace(cfg.OutputDir) == "" {
+		cfg.OutputDir = filepath.Join("data", "generated", "firewall")
+	}
+	if cfg.MinConfidence <= 0 || cfg.MinConfidence > 1 {
+		cfg.MinConfidence = 0.8
+	}
+	if !cfg.IncludeIPv4 && !cfg.IncludeIPv6 {
+		cfg.IncludeIPv4 = true
+		cfg.IncludeIPv6 = true
+	}
+	if len(cfg.Scenes) == 0 {
+		cfg.Scenes = []string{"IDC", "CDN", "TOR", "PROXY", "BLOCKLIST"}
+	} else {
+		cfg.Scenes = cleanUpperStringSlice(cfg.Scenes)
+	}
+	cfg.Countries = cleanUpperStringSlice(cfg.Countries)
+	cfg.Companies = cleanStringSlice(cfg.Companies)
 }
 
 func boolPtr(value bool) *bool {

@@ -73,7 +73,7 @@ curl "http://127.0.0.1:18080/api/lookup?query=AS15169"
 | `country` / `registry` | 离线库或分配记录里的国家/地区和注册局。 |
 | `matched_prefix` | 命中的网段。 |
 | `routing_status` | `announced`、`not_announced` 等。 |
-| `scene` / `scene_name` | 主应用场景。低置信度时可被在线增强信息修正。 |
+| `scene` / `scene_name` | 主应用场景。低置信度时可被多源证据修正。 |
 | `inferred_scene` / `inferred_scene_name` | 推断用途。 |
 | `confidence` | 主场景置信度。 |
 | `inferred_confidence` / `inferred_source` | 推断用途置信度和来源。 |
@@ -91,7 +91,7 @@ curl "http://127.0.0.1:18080/api/lookup?query=AS15169"
 | `prefixes` | 相关网段。 |
 | `db` | 当前离线库状态。 |
 
-用途融合逻辑：主规则高置信度命中时优先保留主规则，例如公共 DNS、DSL 反向 DNS、保留地址等；在线增强里的机房/出口信息会作为参考证据写入 `evidence`，`inferred_source` 会显示 `主场景规则 + 在线增强参考`。主规则低置信度时，RDAP / WHOIS 或机房/出口推断可修正 `scene` 和 `inferred_scene`。
+用途融合逻辑：主规则高置信度命中时优先保留主规则，例如公共 DNS、DSL 反向 DNS、保留地址等；在线增强里的机房/出口信息会作为参考证据写入 `evidence`，`inferred_source` 会显示 `主场景规则 + 在线增强参考`。主规则低置信度时，会把主规则、RDAP / WHOIS、AI 和机房/出口推断放入 `source_votes` 做加权投票；只有多源一致且分数明显高于原结论时，才修正 `scene` 和 `inferred_scene`。
 
 ### routing_security
 

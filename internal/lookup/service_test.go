@@ -320,6 +320,42 @@ func TestServiceAddsGeoConsistencyWithLocationCountry(t *testing.T) {
 	}
 }
 
+func TestApplyWeightedSourceDecisionPromotesConsensus(t *testing.T) {
+	result := &Result{
+		QueryType:          "ip",
+		Scene:              "NET",
+		SceneName:          "基础设施",
+		Confidence:         0.72,
+		InferredScene:      "NET",
+		InferredSceneName:  "基础设施",
+		InferredConfidence: 0.72,
+		InferredSource:     "主场景规则",
+		Registration: &enrich.Result{
+			InferredScene:      "IDC",
+			InferredSceneName:  "数据中心",
+			InferredConfidence: 0.84,
+			NetName:            "Example Cloud Hosting",
+		},
+		Egress: &EgressInfo{
+			Type:       "IDC",
+			Summary:    "机房 Example Facility",
+			Confidence: 0.65,
+		},
+	}
+
+	applyWeightedSourceDecision(result)
+
+	if result.Scene != "IDC" || result.InferredScene != "IDC" {
+		t.Fatalf("expected IDC consensus promotion, got %#v", result)
+	}
+	if result.Confidence < 0.8 {
+		t.Fatalf("expected promoted confidence, got %f", result.Confidence)
+	}
+	if !containsEvidence(result.Evidence, "多源投票修正用途") {
+		t.Fatalf("expected weighted decision evidence, got %#v", result.Evidence)
+	}
+}
+
 func TestServiceAddsEgressInferenceForMultipleIPs(t *testing.T) {
 	tests := []struct {
 		name         string

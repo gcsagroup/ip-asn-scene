@@ -71,7 +71,7 @@ data/cache
 - `data/raw`：原始离线数据库，例如 CAIDA、RIR、PeeringDB、IANA RDAP、ip2region、RPKI VRP、IRR route dump、BGP 观察摘要。
 - `data/raw/bgp`：全量 BGP 模式下载的 RouteViews / RIPE RIS MRT RIB 原始文件。
 - `data/raw/history`：历史 BGP 样本。
-- `data/generated`：自动生成的服务规则和 BGP 汇总索引，例如 `services.json`、`bgp-observations-full.jsonl.gz`。
+- `data/generated`：自动生成的服务规则、BGP 汇总索引和防火墙列表，例如 `services.json`、`bgp-observations-full.jsonl.gz`、`firewall/`。
 - `data/processed`：解析后生成的索引状态和清单。
 - `data/cache`：运行时缓存，当前主要是 `data/cache/enrich`。
 

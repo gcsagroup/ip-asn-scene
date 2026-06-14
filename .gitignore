@@ -1,6 +1,7 @@
 config.yaml
 data/cache/
 data/evaluation/
+data/generated/firewall/
 data/raw/bgp/
 cache/
 dist/

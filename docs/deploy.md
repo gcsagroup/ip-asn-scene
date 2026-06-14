@@ -85,6 +85,35 @@ git lfs pull
 
 这一步会下载离线数据库并生成查询索引。以后服务会按 `update_interval_hours` 自动更新。
 
+## 生成防火墙 CIDR 列表
+
+确认 `config.yaml` 里的 `firewall_lists` 已配置后执行：
+
+```bash
+./ipasn -config config.yaml -generate-firewall-lists
+```
+
+默认输出到：
+
+```text
+data/generated/firewall/
+```
+
+主要文件：
+
+```text
+index.json
+country-CN.cidr
+company-alibaba.cidr
+scene-IDC.cidr
+scene-TOR.cidr
+scene-PROXY.cidr
+```
+
+如果在 `firewall_lists.write_entries` 打开明细输出，会额外生成 `entries.jsonl`。
+
+生成过程读取 ip2region IPv4/IPv6 xdb 全量库，并结合 ASN、规则和本地离线索引。后续后台更新离线库不会自动提交这些生成结果。
+
 ## 启动服务
 
 控制台启动：

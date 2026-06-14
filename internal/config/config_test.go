@@ -149,6 +149,77 @@ func TestLoadIP2RegionFromEnv(t *testing.T) {
 	}
 }
 
+func TestLoadFirewallListsFromYAML(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`
+firewall_lists:
+  enabled: true
+  output_dir: "data/generated/firewall-test"
+  countries: ["CN", "US"]
+  companies: ["alibaba", "cloudflare"]
+  scenes: ["IDC", "CDN", "TOR", "PROXY"]
+  min_confidence: 0.82
+  include_ipv4: true
+  include_ipv6: false
+  write_entries: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.FirewallLists.Enabled {
+		t.Fatal("expected firewall list generation enabled")
+	}
+	if cfg.FirewallLists.OutputDir != "data/generated/firewall-test" {
+		t.Fatalf("unexpected output dir: %#v", cfg.FirewallLists)
+	}
+	if len(cfg.FirewallLists.Countries) != 2 || cfg.FirewallLists.Countries[0] != "CN" {
+		t.Fatalf("unexpected countries: %#v", cfg.FirewallLists.Countries)
+	}
+	if len(cfg.FirewallLists.Companies) != 2 || cfg.FirewallLists.Companies[1] != "cloudflare" {
+		t.Fatalf("unexpected companies: %#v", cfg.FirewallLists.Companies)
+	}
+	if len(cfg.FirewallLists.Scenes) != 4 || cfg.FirewallLists.Scenes[2] != "TOR" {
+		t.Fatalf("unexpected scenes: %#v", cfg.FirewallLists.Scenes)
+	}
+	if cfg.FirewallLists.MinConfidence != 0.82 {
+		t.Fatalf("unexpected min confidence: %f", cfg.FirewallLists.MinConfidence)
+	}
+	if !cfg.FirewallLists.IncludeIPv4 || cfg.FirewallLists.IncludeIPv6 {
+		t.Fatalf("unexpected IP version flags: %#v", cfg.FirewallLists)
+	}
+	if !cfg.FirewallLists.WriteEntries {
+		t.Fatalf("expected write_entries to be enabled")
+	}
+}
+
+func TestLoadGenerateFirewallYAML(t *testing.T) {
+	cfg, err := LoadFromFile(filepath.Join("..", "..", "generate_firewall.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.FirewallLists.Countries) != 0 {
+		t.Fatalf("generate_firewall.yaml should export all countries, got %#v", cfg.FirewallLists.Countries)
+	}
+	if !cfg.FirewallLists.IncludeIPv4 || !cfg.FirewallLists.IncludeIPv6 {
+		t.Fatalf("generate_firewall.yaml should include IPv4 and IPv6: %#v", cfg.FirewallLists)
+	}
+	if cfg.FirewallLists.WriteEntries {
+		t.Fatal("generate_firewall.yaml should keep entries output disabled by default")
+	}
+	for _, company := range []string{"aws", "azure", "google", "alibaba", "tencent", "cloudflare", "oracle", "digitalocean"} {
+		if !containsString(cfg.FirewallLists.Companies, company) {
+			t.Fatalf("generate_firewall.yaml missing company %q: %#v", company, cfg.FirewallLists.Companies)
+		}
+	}
+	if len(cfg.FirewallLists.Scenes) != 2 || cfg.FirewallLists.Scenes[0] != "CDN" || cfg.FirewallLists.Scenes[1] != "IDC" {
+		t.Fatalf("generate_firewall.yaml should generate CDN and IDC scenes: %#v", cfg.FirewallLists.Scenes)
+	}
+}
+
 func TestLoadReliabilitySourcesFromEnv(t *testing.T) {
 	t.Setenv("RPKI_VRP_URLS", "https://example.test/vrps.csv,https://example.test/vrps-v6.csv")
 	t.Setenv("IRR_ROUTE_URLS", "https://example.test/radb.db.gz")
@@ -168,6 +239,15 @@ func TestLoadReliabilitySourcesFromEnv(t *testing.T) {
 	if len(cfg.Sources.GeofeedURLs) != 1 || cfg.Sources.GeofeedURLs[0] != "https://example.test/geofeed.csv" {
 		t.Fatalf("unexpected geofeed URLs: %#v", cfg.Sources.GeofeedURLs)
 	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestDefaultIncludesMaintainedReliabilitySources(t *testing.T) {

@@ -19,6 +19,7 @@ import (
 	"ipasn/internal/classify"
 	"ipasn/internal/config"
 	"ipasn/internal/enrich"
+	"ipasn/internal/firewall"
 	"ipasn/internal/geo"
 	"ipasn/internal/httpapi"
 	"ipasn/internal/lookup"
@@ -41,6 +42,7 @@ func run(args []string) int {
 	fs.SetOutput(os.Stderr)
 	downloadOnly := fs.Bool("download-only", false, "download offline databases, build index, then exit")
 	updateOnStart := fs.Bool("update-on-start", false, "download offline databases before serving")
+	generateFirewallLists := fs.Bool("generate-firewall-lists", false, "generate offline firewall CIDR lists from ip2region and local rules")
 	forceConsole := fs.Bool("console", false, "run in console mode even without a terminal")
 	installService := fs.Bool("install-service", false, "install as an operating system service")
 	uninstallService := fs.Bool("uninstall-service", false, "uninstall the operating system service")
@@ -78,6 +80,16 @@ func run(args []string) int {
 	}
 	if *enrichmentForegroundTimeoutMS >= 0 {
 		cfg.Enrichment.ForegroundTimeout = time.Duration(*enrichmentForegroundTimeoutMS) * time.Millisecond
+	}
+
+	if *generateFirewallLists {
+		ctx, cancel := signal.NotifyContext(context.Background(), shutdownSignals()...)
+		defer cancel()
+		if err := generateFirewallListsCommand(ctx, cfg); err != nil {
+			log.Printf("firewall list generation failed: %v", err)
+			return 1
+		}
+		return 0
 	}
 
 	program := &serviceProgram{cfg: cfg, downloadOnly: *downloadOnly, updateOnStart: *updateOnStart}
@@ -207,6 +219,26 @@ func serve(ctx context.Context, cfg config.Config, downloadOnly, updateOnStart b
 	case err := <-serverErr:
 		return err
 	}
+}
+
+func generateFirewallListsCommand(ctx context.Context, cfg config.Config) error {
+	if !cfg.FirewallLists.Enabled {
+		return fmt.Errorf("firewall_lists.enabled is false")
+	}
+	loadServiceRules(cfg)
+	manager := update.NewManager(cfg)
+	snapshot := manager.Snapshot()
+	summary, err := firewall.GenerateFromIP2Region(ctx, cfg, snapshot)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("generated firewall lists: records=%d exported=%d files=%d output_dir=%s\n",
+		summary.TotalRecords,
+		summary.ExportedRecord,
+		len(summary.Files),
+		cfg.FirewallLists.OutputDir,
+	)
+	return nil
 }
 
 type serviceProgram struct {
@@ -409,12 +441,20 @@ func buildEnricher(cfg config.Config) lookup.Enricher {
 }
 
 func buildGeoLocator(cfg config.Config) geo.Locator {
-	locator, err := geo.NewIP2RegionLocator(cfg.IP2Region)
+	locators := []geo.Locator{}
+	geofeedLocator, err := geo.NewGeofeedLocatorFromDir(cfg.DataDir)
+	if err != nil {
+		log.Printf("geofeed load failed: %v", err)
+	} else if geofeedLocator != nil {
+		locators = append(locators, geofeedLocator)
+	}
+	ip2regionLocator, err := geo.NewIP2RegionLocator(cfg.IP2Region)
 	if err != nil {
 		log.Printf("ip2region load failed: %v", err)
-		return nil
+	} else if ip2regionLocator != nil {
+		locators = append(locators, ip2regionLocator)
 	}
-	return locator
+	return geo.NewCompositeLocator(locators...)
 }
 
 func buildAdvisor(cfg config.Config) ai.Advisor {
