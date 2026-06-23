@@ -33,14 +33,19 @@ type generatedServiceRuleFile struct {
 }
 
 type generatedServiceRule struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Scene        string   `json:"scene"`
-	SceneName    string   `json:"scene_name"`
-	Confidence   float64  `json:"confidence"`
-	Prefixes     []string `json:"prefixes"`
-	RDNSContains []string `json:"rdns_contains,omitempty"`
-	Evidence     string   `json:"evidence"`
+	ID                string   `json:"id"`
+	Name              string   `json:"name"`
+	Scene             string   `json:"scene"`
+	SceneName         string   `json:"scene_name"`
+	Confidence        float64  `json:"confidence"`
+	Prefixes          []string `json:"prefixes"`
+	RDNSContains      []string `json:"rdns_contains,omitempty"`
+	Evidence          string   `json:"evidence"`
+	ServiceName       string   `json:"service_name,omitempty"`
+	ServiceSubtype    string   `json:"service_subtype,omitempty"`
+	RiskLevel         string   `json:"risk_level,omitempty"`
+	BlockRecommended  *bool    `json:"block_recommended,omitempty"`
+	NormalUserTraffic *bool    `json:"normal_user_traffic,omitempty"`
 }
 
 type spfTXTLookup interface {
@@ -113,6 +118,12 @@ func RefreshDynamicServiceRulesWithClient(ctx context.Context, cfg config.Config
 	addRule("dynamic-mon-uptimerobot", rule, err)
 	rule, err = fetchSpamhausDropRule(ctx, client, cfg.DynamicRules.SpamhausDropV4URL, cfg.DynamicRules.SpamhausDropV6URL)
 	addRule("dynamic-blocklist-spamhaus-drop", rule, err)
+	rule, err = fetchAddressListRule(ctx, client, cfg.DynamicRules.FireHOLLevel1URL, "dynamic-blocklist-firehol-level1", "FireHOL level1", "BLOCKLIST", "风险名单", 0.98, "FireHOL level1 聚合风险网段")
+	addRule("dynamic-blocklist-firehol-level1", rule, err)
+	rule, err = fetchAddressListRule(ctx, client, cfg.DynamicRules.FireHOLAnonymousURL, "dynamic-proxy-firehol-anonymous", "FireHOL anonymous", "PROXY", "代理服务", 0.94, "FireHOL anonymous 匿名代理/Tor 聚合网段")
+	addRule("dynamic-proxy-firehol-anonymous", rule, err)
+	rule, err = fetchAddressListRule(ctx, client, cfg.DynamicRules.Az0VPNIPURL, "dynamic-vpn-az0-vpn-ip", "az0/vpn_ip", "VPN", "VPN 出口", 0.93, "az0/vpn_ip 公开 VPN IP 列表")
+	addRule("dynamic-vpn-az0-vpn-ip", rule, err)
 	rule, err = fetchCombinedAddressListRule(ctx, client, []string{cfg.DynamicRules.CloudflareV4URL, cfg.DynamicRules.CloudflareV6URL}, "dynamic-cdn-cloudflare", "Cloudflare CDN", "CDN", "内容分发", 0.99, "Cloudflare 官方 CDN IP 段")
 	addRule("dynamic-cdn-cloudflare", rule, err)
 	rule, err = fetchFastlyRule(ctx, client, cfg.DynamicRules.FastlyURL)
@@ -129,6 +140,16 @@ func RefreshDynamicServiceRulesWithClient(ctx context.Context, cfg config.Config
 	addRule("dynamic-idc-oracle-cloud", rule, err)
 	rule, err = fetchGitHubMetaRule(ctx, client, cfg.DynamicRules.GitHubMetaURL)
 	addRule("dynamic-org-github", rule, err)
+	rule, err = fetchGeofeedRule(ctx, client, cfg.DynamicRules.ApplePrivateRelayURL, "dynamic-proxy-apple-private-relay", "Apple iCloud Private Relay", "PROXY", "隐私代理", 0.99, "Apple 官方 iCloud Private Relay 出口 IP 段")
+	rule = withConsumerPrivacyPolicy(rule, "consumer_privacy_proxy")
+	addRule("dynamic-proxy-apple-private-relay", rule, err)
+	rule, err = fetchGeofeedRule(ctx, client, cfg.DynamicRules.GoogleFiVPNGeofeedURL, "dynamic-vpn-google-fi", "Google Fi VPN", "VPN", "VPN 出口", 0.98, "Google Fi VPN geofeed")
+	rule = withConsumerPrivacyPolicy(rule, "carrier_privacy_vpn")
+	addRule("dynamic-vpn-google-fi", rule, err)
+	rule, err = fetchMullvadRelaysRule(ctx, client, cfg.DynamicRules.MullvadRelaysURL)
+	addRule("dynamic-vpn-mullvad", rule, err)
+	rule, err = fetchNordVPNServersRule(ctx, client, cfg.DynamicRules.NordVPNServersURL)
+	addRule("dynamic-vpn-nordvpn", rule, err)
 	ip2proxyRules, err := fetchIP2ProxyRules(ctx, client, cfg)
 	if err != nil {
 		sourceErrors = append(sourceErrors, err.Error())
@@ -322,6 +343,51 @@ func fetchGitHubMetaRule(ctx context.Context, client *http.Client, url string) (
 		return generatedServiceRule{}, fmt.Errorf("GitHub Meta: %w", err)
 	}
 	return newGeneratedServiceRule("dynamic-org-github", "GitHub", "ORG", "组织机构", 0.92, prefixes, "GitHub 官方 Meta IP 段"), nil
+}
+
+func fetchGeofeedRule(ctx context.Context, client *http.Client, url, id, name, scene, sceneName string, confidence float64, evidence string) (generatedServiceRule, error) {
+	if strings.TrimSpace(url) == "" {
+		return generatedServiceRule{}, nil
+	}
+	body, err := downloadBytes(ctx, client, url)
+	if err != nil {
+		return generatedServiceRule{}, fmt.Errorf("%s: %w", name, err)
+	}
+	prefixes, err := parseGeofeedPrefixes(body)
+	if err != nil {
+		return generatedServiceRule{}, fmt.Errorf("%s: %w", name, err)
+	}
+	return newGeneratedServiceRule(id, name, scene, sceneName, confidence, prefixes, evidence), nil
+}
+
+func fetchMullvadRelaysRule(ctx context.Context, client *http.Client, url string) (generatedServiceRule, error) {
+	if strings.TrimSpace(url) == "" {
+		return generatedServiceRule{}, nil
+	}
+	body, err := downloadBytes(ctx, client, url)
+	if err != nil {
+		return generatedServiceRule{}, fmt.Errorf("Mullvad relays: %w", err)
+	}
+	prefixes, err := parseMullvadRelayPrefixes(body)
+	if err != nil {
+		return generatedServiceRule{}, fmt.Errorf("Mullvad relays: %w", err)
+	}
+	return newGeneratedServiceRule("dynamic-vpn-mullvad", "Mullvad VPN", "VPN", "VPN 出口", 0.96, prefixes, "Mullvad 官方 relay API"), nil
+}
+
+func fetchNordVPNServersRule(ctx context.Context, client *http.Client, url string) (generatedServiceRule, error) {
+	if strings.TrimSpace(url) == "" {
+		return generatedServiceRule{}, nil
+	}
+	body, err := downloadBytes(ctx, client, url)
+	if err != nil {
+		return generatedServiceRule{}, fmt.Errorf("NordVPN servers: %w", err)
+	}
+	prefixes, err := parseNordVPNServerPrefixes(body)
+	if err != nil {
+		return generatedServiceRule{}, fmt.Errorf("NordVPN servers: %w", err)
+	}
+	return newGeneratedServiceRule("dynamic-vpn-nordvpn", "NordVPN", "VPN", "VPN 出口", 0.94, prefixes, "NordVPN servers API"), nil
 }
 
 func fetchMailSPFRule(ctx context.Context, resolver spfTXTLookup, domains []string) (generatedServiceRule, error) {
@@ -619,6 +685,20 @@ func newGeneratedServiceRule(id, name, scene, sceneName string, confidence float
 	}
 }
 
+func withConsumerPrivacyPolicy(rule generatedServiceRule, subtype string) generatedServiceRule {
+	if rule.ID == "" {
+		return rule
+	}
+	blockRecommended := false
+	normalUserTraffic := true
+	rule.ServiceName = rule.Name
+	rule.ServiceSubtype = subtype
+	rule.RiskLevel = "low"
+	rule.BlockRecommended = &blockRecommended
+	rule.NormalUserTraffic = &normalUserTraffic
+	return rule
+}
+
 func bigRangeToPrefixes(start, end *big.Int, bits int) []string {
 	current := new(big.Int).Set(start)
 	one := big.NewInt(1)
@@ -843,6 +923,71 @@ func parseGitHubMetaPrefixes(body []byte) ([]string, error) {
 	return out, nil
 }
 
+func parseGeofeedPrefixes(body []byte) ([]string, error) {
+	reader := csv.NewReader(bytes.NewReader(body))
+	reader.FieldsPerRecord = -1
+	reader.TrimLeadingSpace = true
+	out := []string{}
+	for {
+		row, err := reader.Read()
+		if errors.Is(err, io.EOF) {
+			return out, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if len(row) == 0 {
+			continue
+		}
+		prefix := strings.TrimSpace(row[0])
+		if prefix == "" || strings.HasPrefix(prefix, "#") {
+			continue
+		}
+		out = appendNormalizedPrefix(out, prefix)
+	}
+}
+
+func parseMullvadRelayPrefixes(body []byte) ([]string, error) {
+	var relays []struct {
+		Active     bool   `json:"active"`
+		IPv4AddrIn string `json:"ipv4_addr_in"`
+		IPv6AddrIn string `json:"ipv6_addr_in"`
+	}
+	if err := json.Unmarshal(body, &relays); err != nil {
+		return nil, err
+	}
+	out := []string{}
+	for _, relay := range relays {
+		if !relay.Active {
+			continue
+		}
+		out = appendNormalizedPrefix(out, relay.IPv4AddrIn)
+		out = appendNormalizedPrefix(out, relay.IPv6AddrIn)
+	}
+	return out, nil
+}
+
+func parseNordVPNServerPrefixes(body []byte) ([]string, error) {
+	var servers []struct {
+		Status      string `json:"status"`
+		Station     string `json:"station"`
+		IPv6Station string `json:"ipv6_station"`
+	}
+	if err := json.Unmarshal(body, &servers); err != nil {
+		return nil, err
+	}
+	out := []string{}
+	for _, server := range servers {
+		status := strings.ToLower(strings.TrimSpace(server.Status))
+		if status != "" && status != "online" {
+			continue
+		}
+		out = appendNormalizedPrefix(out, server.Station)
+		out = appendNormalizedPrefix(out, server.IPv6Station)
+	}
+	return out, nil
+}
+
 func parseAddressListPrefixes(body []byte) []string {
 	out := []string{}
 	scanner := bufio.NewScanner(bytes.NewReader(body))
@@ -983,16 +1128,164 @@ func appendNormalizedPrefix(values []string, value string) []string {
 
 func uniqueSortedPrefixes(prefixes []string) []string {
 	seen := map[string]bool{}
-	out := []string{}
+	parsed := []netip.Prefix{}
 	for _, prefix := range prefixes {
 		if prefix == "" || seen[prefix] {
 			continue
 		}
-		seen[prefix] = true
-		out = append(out, prefix)
+		value, err := netip.ParsePrefix(prefix)
+		if err != nil {
+			continue
+		}
+		value = value.Masked()
+		key := value.String()
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		parsed = append(parsed, value)
 	}
+	out := stringifyPrefixes(coalescePrefixes(parsed))
 	sort.Strings(out)
 	return out
+}
+
+func coalescePrefixes(prefixes []netip.Prefix) []netip.Prefix {
+	set := map[string]netip.Prefix{}
+	for _, prefix := range prefixes {
+		prefix = prefix.Masked()
+		set[prefix.String()] = prefix
+	}
+	for {
+		next := removeCoveredPrefixes(set)
+		merged, changed := mergeSiblingPrefixes(next)
+		if !changed && len(merged) == len(set) {
+			return sortedPrefixValues(merged)
+		}
+		set = merged
+	}
+}
+
+func removeCoveredPrefixes(prefixes map[string]netip.Prefix) map[string]netip.Prefix {
+	values := sortedPrefixValues(prefixes)
+	out := map[string]netip.Prefix{}
+	kept := []netip.Prefix{}
+	for _, prefix := range values {
+		covered := false
+		for _, parent := range kept {
+			if prefixFamily(parent) == prefixFamily(prefix) && parent.Bits() <= prefix.Bits() && parent.Contains(prefix.Addr()) {
+				covered = true
+				break
+			}
+		}
+		if covered {
+			continue
+		}
+		out[prefix.String()] = prefix
+		kept = append(kept, prefix)
+	}
+	return out
+}
+
+func mergeSiblingPrefixes(prefixes map[string]netip.Prefix) (map[string]netip.Prefix, bool) {
+	values := sortedPrefixValues(prefixes)
+	sort.Slice(values, func(i, j int) bool {
+		if values[i].Bits() == values[j].Bits() {
+			return prefixLess(values[i], values[j])
+		}
+		return values[i].Bits() > values[j].Bits()
+	})
+	out := map[string]netip.Prefix{}
+	used := map[string]bool{}
+	changed := false
+	for _, prefix := range values {
+		key := prefix.String()
+		if used[key] {
+			continue
+		}
+		sibling, ok := siblingPrefix(prefix)
+		if ok {
+			siblingKey := sibling.String()
+			if _, found := prefixes[siblingKey]; found && !used[siblingKey] {
+				parent := netip.PrefixFrom(prefix.Addr(), prefix.Bits()-1).Masked()
+				out[parent.String()] = parent
+				used[key] = true
+				used[siblingKey] = true
+				changed = true
+				continue
+			}
+		}
+		out[key] = prefix
+		used[key] = true
+	}
+	return out, changed
+}
+
+func siblingPrefix(prefix netip.Prefix) (netip.Prefix, bool) {
+	prefix = prefix.Masked()
+	addr := prefix.Addr().Unmap()
+	bits := prefix.Bits()
+	maxBits := 128
+	if addr.Is4() {
+		maxBits = 32
+	}
+	if bits <= 0 || bits > maxBits {
+		return netip.Prefix{}, false
+	}
+	value := addrToBigInt(addr, maxBits)
+	value.SetBit(value, maxBits-bits, 1-value.Bit(maxBits-bits))
+	siblingAddr, ok := bigIntToAddr(value, maxBits)
+	if !ok {
+		return netip.Prefix{}, false
+	}
+	return netip.PrefixFrom(siblingAddr, bits).Masked(), true
+}
+
+func sortedPrefixValues(prefixes map[string]netip.Prefix) []netip.Prefix {
+	values := make([]netip.Prefix, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		values = append(values, prefix.Masked())
+	}
+	sort.Slice(values, func(i, j int) bool {
+		if prefixFamily(values[i]) != prefixFamily(values[j]) {
+			return prefixFamily(values[i]) < prefixFamily(values[j])
+		}
+		if values[i].Bits() != values[j].Bits() {
+			return values[i].Bits() < values[j].Bits()
+		}
+		return prefixLess(values[i], values[j])
+	})
+	return values
+}
+
+func stringifyPrefixes(prefixes []netip.Prefix) []string {
+	out := make([]string, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		out = append(out, prefix.Masked().String())
+	}
+	return out
+}
+
+func prefixFamily(prefix netip.Prefix) int {
+	if prefix.Addr().Unmap().Is4() {
+		return 4
+	}
+	return 6
+}
+
+func prefixLess(a, b netip.Prefix) bool {
+	aa := a.Addr().Unmap()
+	bb := b.Addr().Unmap()
+	return bytes.Compare(aa.AsSlice(), bb.AsSlice()) < 0
+}
+
+func addrToBigInt(addr netip.Addr, bits int) *big.Int {
+	if bits == 32 {
+		raw := addr.As4()
+		return new(big.Int).SetBytes(raw[:])
+	}
+	raw := addr.As16()
+	return new(big.Int).SetBytes(raw[:])
 }
 
 func uniqueStrings(values []string) []string {

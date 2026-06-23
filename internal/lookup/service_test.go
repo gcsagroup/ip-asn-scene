@@ -183,6 +183,69 @@ func TestServiceLookupIP(t *testing.T) {
 	}
 }
 
+func TestServiceLookupIPIncludesServicePolicy(t *testing.T) {
+	if err := classify.LoadServiceRules(""); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = classify.LoadServiceRules("") })
+	restoreDNS := setReverseDNSForTest(func(addr string) ([]string, error) { return nil, nil }, time.Hour)
+	defer restoreDNS()
+
+	rulesPath := filepath.Join(t.TempDir(), "services.json")
+	body := []byte(`{
+		"version": "test",
+		"rules": [
+			{
+				"id": "google-fi-vpn",
+				"name": "Google Fi VPN",
+				"scene": "VPN",
+				"scene_name": "VPN 出口",
+				"confidence": 0.98,
+				"prefixes": ["136.22.118.0/29"],
+				"service_name": "Google Fi VPN",
+				"service_subtype": "carrier_privacy_vpn",
+				"risk_level": "low",
+				"block_recommended": false,
+				"normal_user_traffic": true
+			}
+		]
+	}`)
+	if err := os.WriteFile(rulesPath, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := classify.LoadServiceRules(rulesPath); err != nil {
+		t.Fatal(err)
+	}
+
+	prefixes := store.NewPrefixIndex()
+	if err := prefixes.Add("136.22.118.0/29", 15169, "test"); err != nil {
+		t.Fatal(err)
+	}
+	asns := store.NewASNIndex()
+	asns.Upsert(store.ASNProfile{ASN: 15169, Name: "Google LLC", InfoType: "Content"})
+	svc := NewService(store.NewSnapshot(prefixes, asns, store.Status{Version: "test"}))
+
+	result := svc.Lookup("136.22.118.1")
+	if !result.OK {
+		t.Fatalf("expected success: %s", result.Error)
+	}
+	if result.Scene != "VPN" {
+		t.Fatalf("expected VPN scene from service rule, got %#v", result)
+	}
+	if result.ServicePolicy == nil {
+		t.Fatalf("expected service policy in lookup result")
+	}
+	if result.ServicePolicy.ServiceName != "Google Fi VPN" || result.ServicePolicy.ServiceSubtype != "carrier_privacy_vpn" || result.ServicePolicy.RiskLevel != "low" {
+		t.Fatalf("unexpected service policy: %#v", result.ServicePolicy)
+	}
+	if result.ServicePolicy.BlockRecommended == nil || *result.ServicePolicy.BlockRecommended {
+		t.Fatalf("expected no block recommendation, got %#v", result.ServicePolicy)
+	}
+	if result.ServicePolicy.NormalUserTraffic == nil || !*result.ServicePolicy.NormalUserTraffic {
+		t.Fatalf("expected normal user traffic, got %#v", result.ServicePolicy)
+	}
+}
+
 func TestServiceUsesEnrichmentForAnnouncedIP(t *testing.T) {
 	prefixes := store.NewPrefixIndex()
 	if err := prefixes.Add("8.8.8.0/24", 15169, "caida"); err != nil {

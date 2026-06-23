@@ -74,6 +74,52 @@ func TestClassifierLoadsOfflineServiceRules(t *testing.T) {
 	}
 }
 
+func TestClassifierReturnsServicePolicyForConsumerPrivacyRule(t *testing.T) {
+	resetServiceRulesForTest(t)
+	path := filepath.Join(t.TempDir(), "services.json")
+	body := []byte(`{
+		"version": "test",
+		"rules": [
+			{
+				"id": "apple-private-relay",
+				"name": "Apple iCloud Private Relay",
+				"scene": "PROXY",
+				"scene_name": "隐私代理",
+				"confidence": 0.99,
+				"prefixes": ["172.224.226.0/28"],
+				"service_name": "Apple iCloud Private Relay",
+				"service_subtype": "consumer_privacy_proxy",
+				"risk_level": "low",
+				"block_recommended": false,
+				"normal_user_traffic": true
+			}
+		]
+	}`)
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := LoadServiceRules(path); err != nil {
+		t.Fatal(err)
+	}
+
+	result := Classify(Input{IP: netip.MustParseAddr("172.224.226.1")})
+	if result.Scene != "PROXY" {
+		t.Fatalf("expected PROXY from consumer privacy rule, got %#v", result)
+	}
+	if result.ServicePolicy == nil {
+		t.Fatalf("expected service policy in classification result")
+	}
+	if result.ServicePolicy.ServiceSubtype != "consumer_privacy_proxy" || result.ServicePolicy.RiskLevel != "low" {
+		t.Fatalf("unexpected service policy: %#v", result.ServicePolicy)
+	}
+	if result.ServicePolicy.BlockRecommended == nil || *result.ServicePolicy.BlockRecommended {
+		t.Fatalf("expected default no-block service policy, got %#v", result.ServicePolicy)
+	}
+	if result.ServicePolicy.NormalUserTraffic == nil || !*result.ServicePolicy.NormalUserTraffic {
+		t.Fatalf("expected normal user traffic policy, got %#v", result.ServicePolicy)
+	}
+}
+
 func TestClassifierAcceptsExtendedOfflineServiceScenes(t *testing.T) {
 	resetServiceRulesForTest(t)
 	path := filepath.Join(t.TempDir(), "services.json")

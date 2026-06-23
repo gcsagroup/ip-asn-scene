@@ -82,6 +82,78 @@ func TestLookupAPI(t *testing.T) {
 	}
 }
 
+func TestLookupAPIIncludesQualityByParameter(t *testing.T) {
+	prefixes := store.NewPrefixIndex()
+	if err := prefixes.Add("8.8.8.0/24", 15169, "test"); err != nil {
+		t.Fatal(err)
+	}
+	asns := store.NewASNIndex()
+	asns.Upsert(store.ASNProfile{ASN: 15169, Name: "Google LLC"})
+	svc := lookup.NewService(store.NewSnapshot(prefixes, asns, store.Status{Version: "test"}))
+	server := New(ServerOptions{Lookup: svc, Config: config.Default()})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/lookup?query=8.8.8.8", nil)
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	var ordinary map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &ordinary); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ordinary["ip_quality"]; ok {
+		t.Fatalf("expected quality to be omitted by default: %s", rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/lookup?query=8.8.8.8&include_quality=1", nil)
+	rec = httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	var withQuality struct {
+		Quality struct {
+			Score          int    `json:"score"`
+			Grade          string `json:"grade"`
+			RiskLevel      string `json:"risk_level"`
+			Recommendation string `json:"recommendation"`
+		} `json:"ip_quality"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &withQuality); err != nil {
+		t.Fatal(err)
+	}
+	if withQuality.Quality.Score == 0 || withQuality.Quality.Grade == "" || withQuality.Quality.RiskLevel == "" || withQuality.Quality.Recommendation == "" {
+		t.Fatalf("expected quality result in lookup response: %s", rec.Body.String())
+	}
+}
+
+func TestQualityAPI(t *testing.T) {
+	prefixes := store.NewPrefixIndex()
+	if err := prefixes.Add("1.2.3.0/24", 64500, "test"); err != nil {
+		t.Fatal(err)
+	}
+	asns := store.NewASNIndex()
+	asns.Upsert(store.ASNProfile{ASN: 64500, Name: "Example VPN Hosting"})
+	svc := lookup.NewService(store.NewSnapshot(prefixes, asns, store.Status{Version: "test"}))
+	server := New(ServerOptions{Lookup: svc, Config: config.Default()})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/quality?query=1.2.3.4", nil)
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		OK      bool `json:"ok"`
+		Quality struct {
+			Score          int      `json:"score"`
+			Labels         []string `json:"labels"`
+			Recommendation string   `json:"recommendation"`
+		} `json:"ip_quality"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.OK || body.Quality.Score == 0 || body.Quality.Recommendation == "" {
+		t.Fatalf("expected quality API response, got %s", rec.Body.String())
+	}
+}
+
 func TestLookupAPIParsesOnlineEnrichmentMode(t *testing.T) {
 	prefixes := store.NewPrefixIndex()
 	if err := prefixes.Add("223.119.0.0/16", 58453, "test"); err != nil {
@@ -161,7 +233,7 @@ func TestIndexPageRendersLocationWithoutInternalMetadata(t *testing.T) {
 	server.ServeHTTP(rec, req)
 
 	body := rec.Body.String()
-	for _, expected := range []string{"位置", "国家码", "ASN", "country_code", "location.asn", "online-enrichment", "等待联网结果", "数据质量", "路由安全", "多源投票", "风险提示"} {
+	for _, expected := range []string{"位置", "国家码", "ASN", "country_code", "location.asn", "online-enrichment", "等待联网结果", "数据质量", "IP 质量", "include_quality", "路由安全", "多源投票", "风险提示", "服务策略", "建议拦截", "正常用户流量"} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("expected index page to contain %q", expected)
 		}
@@ -217,6 +289,13 @@ func TestAdminPageAndConfigAPI(t *testing.T) {
 		"cfg-data-dir",
 		"cfg-bgp-mode",
 		"cfg-ip2region-enabled",
+		"cfg-quality-enabled",
+		"cfg-quality-include-default",
+		"cfg-quality-allow-score",
+		"cfg-apple-private-relay-url",
+		"cfg-google-fi-vpn-geofeed-url",
+		"cfg-mullvad-relays-url",
+		"cfg-nordvpn-servers-url",
 		"saveConfigFromForm",
 		"可选增强源",
 		"已预置 rpki-client 公共 CSV",
@@ -265,7 +344,7 @@ func TestAdminPageAndConfigAPI(t *testing.T) {
 		t.Fatalf("expected restart hint, got %s", rec.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodPut, "/api/admin/config", strings.NewReader(`{"addr":":19999","data_dir":"data-test","update_interval_hours":12,"http_timeout_seconds":9,"tls":{"enabled":true,"cert_file":"cert.pem","key_file":"key.pem"},"ip2region":{"enabled":true,"include_default":true,"v4_file":"data/raw/v4.xdb","v6_file":"data/raw/v6.xdb"},"enrichment":{"enabled":true,"ttl_hours":48,"timeout_seconds":6,"async_on_miss":false,"foreground_timeout_ms":2500},"history":{"snapshots":5},"admin":{"enabled":true,"path":"/manage","local_only":false},"ai":{"provider":"ollama","ollama_model":"qwen3:8b","ollama_base_url":"http://127.0.0.1:11434","confidence_cutoff":0.55,"timeout_seconds":20,"max_cache":2000}}`))
+	req = httptest.NewRequest(http.MethodPut, "/api/admin/config", strings.NewReader(`{"addr":":19999","data_dir":"data-test","update_interval_hours":12,"http_timeout_seconds":9,"tls":{"enabled":true,"cert_file":"cert.pem","key_file":"key.pem"},"ip2region":{"enabled":true,"include_default":true,"v4_file":"data/raw/v4.xdb","v6_file":"data/raw/v6.xdb"},"quality":{"enabled":true,"include_default":true,"ai_low_confidence":false,"low_confidence_threshold":0.52,"allow_score":82,"review_score":64,"challenge_score":43,"rate_limit_score":21},"enrichment":{"enabled":true,"ttl_hours":48,"timeout_seconds":6,"async_on_miss":false,"foreground_timeout_ms":2500},"history":{"snapshots":5},"admin":{"enabled":true,"path":"/manage","local_only":false},"ai":{"provider":"ollama","ollama_model":"qwen3:8b","ollama_base_url":"http://127.0.0.1:11434","confidence_cutoff":0.55,"timeout_seconds":20,"max_cache":2000},"dynamic_rules":{"firehol_level1_url":"https://example.test/firehol_level1.netset","firehol_anonymous_url":"https://example.test/firehol_anonymous.netset","az0_vpn_ip_url":"https://example.test/az0-vpn-ip.txt","apple_private_relay_url":"https://example.test/apple.csv","google_fi_vpn_geofeed_url":"https://example.test/google-fi.txt","mullvad_relays_url":"https://example.test/mullvad.json","nordvpn_servers_url":"https://example.test/nordvpn.json"}}`))
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("X-Admin-Token", "secret")
 	rec = httptest.NewRecorder()
@@ -279,6 +358,9 @@ func TestAdminPageAndConfigAPI(t *testing.T) {
 	if !store.cfg.IP2Region.Enabled || !store.cfg.IP2Region.IncludeDefault || store.cfg.IP2Region.V4File != "data/raw/v4.xdb" {
 		t.Fatalf("expected ip2region config update, got %#v", store.cfg.IP2Region)
 	}
+	if !store.cfg.Quality.Enabled || !store.cfg.Quality.IncludeDefault || store.cfg.Quality.AILowConfidence || store.cfg.Quality.LowConfidenceThreshold != 0.52 || store.cfg.Quality.AllowScore != 82 {
+		t.Fatalf("expected quality config update, got %#v", store.cfg.Quality)
+	}
 	if !store.cfg.Enrichment.Enabled || store.cfg.Enrichment.TTL.String() != "48h0m0s" || store.cfg.Enrichment.AsyncOnMiss {
 		t.Fatalf("expected enrichment config update, got %#v", store.cfg.Enrichment)
 	}
@@ -287,6 +369,18 @@ func TestAdminPageAndConfigAPI(t *testing.T) {
 	}
 	if store.cfg.AI.Provider != "ollama" || store.cfg.AI.OllamaModel != "qwen3:8b" || store.cfg.AI.ConfidenceCutoff != 0.55 {
 		t.Fatalf("expected ai config update, got %#v", store.cfg.AI)
+	}
+	if store.cfg.DynamicRules.ApplePrivateRelayURL != "https://example.test/apple.csv" || store.cfg.DynamicRules.GoogleFiVPNGeofeedURL != "https://example.test/google-fi.txt" {
+		t.Fatalf("expected privacy proxy dynamic URLs update, got %#v", store.cfg.DynamicRules)
+	}
+	if store.cfg.DynamicRules.FireHOLLevel1URL != "https://example.test/firehol_level1.netset" || store.cfg.DynamicRules.FireHOLAnonymousURL != "https://example.test/firehol_anonymous.netset" {
+		t.Fatalf("expected FireHOL dynamic URLs update, got %#v", store.cfg.DynamicRules)
+	}
+	if store.cfg.DynamicRules.Az0VPNIPURL != "https://example.test/az0-vpn-ip.txt" {
+		t.Fatalf("expected az0/vpn_ip dynamic URL update, got %#v", store.cfg.DynamicRules)
+	}
+	if store.cfg.DynamicRules.MullvadRelaysURL != "https://example.test/mullvad.json" || store.cfg.DynamicRules.NordVPNServersURL != "https://example.test/nordvpn.json" {
+		t.Fatalf("expected VPN provider dynamic URLs update, got %#v", store.cfg.DynamicRules)
 	}
 
 	store.cfg.Sources.RPKIVRPURLs = []string{"https://example.test/old.csv"}

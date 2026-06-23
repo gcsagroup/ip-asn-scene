@@ -23,6 +23,7 @@ import (
 	"ipasn/internal/geo"
 	"ipasn/internal/httpapi"
 	"ipasn/internal/lookup"
+	"ipasn/internal/quality"
 	"ipasn/internal/update"
 )
 
@@ -176,6 +177,7 @@ func serve(ctx context.Context, cfg config.Config, downloadOnly, updateOnStart b
 		Enricher:           buildEnricher(cfg),
 		GeoLocator:         buildGeoLocator(cfg),
 		AIConfidenceCutoff: cfg.AI.ConfidenceCutoff,
+		QualityConfig:      qualityConfig(cfg),
 	})
 	server := httpapi.New(httpapi.ServerOptions{
 		Lookup:                 lookupService,
@@ -218,6 +220,19 @@ func serve(ctx context.Context, cfg config.Config, downloadOnly, updateOnStart b
 		}
 	case err := <-serverErr:
 		return err
+	}
+}
+
+func qualityConfig(cfg config.Config) quality.Config {
+	return quality.Config{
+		Enabled:                cfg.Quality.Enabled,
+		IncludeDefault:         cfg.Quality.IncludeDefault,
+		AILowConfidence:        cfg.Quality.AILowConfidence,
+		LowConfidenceThreshold: cfg.Quality.LowConfidenceThreshold,
+		AllowScore:             cfg.Quality.AllowScore,
+		ReviewScore:            cfg.Quality.ReviewScore,
+		ChallengeScore:         cfg.Quality.ChallengeScore,
+		RateLimitScore:         cfg.Quality.RateLimitScore,
 	}
 }
 

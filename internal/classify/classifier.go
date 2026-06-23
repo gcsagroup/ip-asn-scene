@@ -16,15 +16,28 @@ type Input struct {
 }
 
 type Result struct {
-	Scene      string   `json:"scene"`
-	SceneName  string   `json:"scene_name"`
-	Confidence float64  `json:"confidence"`
-	Evidence   []string `json:"evidence"`
+	Scene         string         `json:"scene"`
+	SceneName     string         `json:"scene_name"`
+	Confidence    float64        `json:"confidence"`
+	Evidence      []string       `json:"evidence"`
+	ServicePolicy *ServicePolicy `json:"service_policy,omitempty"`
+}
+
+type ServicePolicy struct {
+	RuleID            string `json:"rule_id,omitempty"`
+	RuleName          string `json:"rule_name,omitempty"`
+	ServiceName       string `json:"service_name,omitempty"`
+	ServiceSubtype    string `json:"service_subtype,omitempty"`
+	RiskLevel         string `json:"risk_level,omitempty"`
+	BlockRecommended  *bool  `json:"block_recommended,omitempty"`
+	NormalUserTraffic *bool  `json:"normal_user_traffic,omitempty"`
 }
 
 type score struct {
-	points   int
-	evidence []string
+	points       int
+	evidence     []string
+	policy       *ServicePolicy
+	policyPoints int
 }
 
 var sceneNames = map[string]string{
@@ -72,7 +85,7 @@ func Classify(input Input) Result {
 	}
 
 	scores := map[string]*score{}
-	add := func(scene string, points int, evidence string) {
+	addWithPolicy := func(scene string, points int, evidence string, policy *ServicePolicy) {
 		if scores[scene] == nil {
 			scores[scene] = &score{}
 		}
@@ -80,6 +93,13 @@ func Classify(input Input) Result {
 		if evidence != "" {
 			scores[scene].evidence = append(scores[scene].evidence, evidence)
 		}
+		if policy != nil && points > scores[scene].policyPoints {
+			scores[scene].policy = policy
+			scores[scene].policyPoints = points
+		}
+	}
+	add := func(scene string, points int, evidence string) {
+		addWithPolicy(scene, points, evidence, nil)
 	}
 
 	text := strings.ToLower(strings.Join([]string{
@@ -93,7 +113,7 @@ func Classify(input Input) Result {
 	if input.IP.IsValid() && containsPrefix(knownDNSPrefixes, input.IP) {
 		add("DNS", 95, "IP 命中已知公共 DNS 网段")
 	}
-	applyServiceRules(input, add)
+	applyServiceRules(input, addWithPolicy)
 	applyASNSceneRules(input, add)
 	if rdnsLooksLikeDNS(input.RDNS) {
 		add("DNS", 90, "反向 DNS 显示为公共 DNS")
@@ -190,10 +210,11 @@ func Classify(input Input) Result {
 	}
 
 	return Result{
-		Scene:      best.scene,
-		SceneName:  sceneNames[best.scene],
-		Confidence: confidence,
-		Evidence:   best.score.evidence,
+		Scene:         best.scene,
+		SceneName:     sceneNames[best.scene],
+		Confidence:    confidence,
+		Evidence:      best.score.evidence,
+		ServicePolicy: best.score.policy,
 	}
 }
 

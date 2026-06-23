@@ -20,6 +20,7 @@ GET /api/lookup
 | --- | --- | --- |
 | `query` | 是 | IP 或 ASN，例如 `8.8.8.8`、`223.119.20.239`、`AS15169`。 |
 | `include_location` | 否 | `1`、`true`、`yes`、`on` 表示返回 IP 所在地。默认由 `ip2region.include_default` 决定。 |
+| `include_quality` | 否 | `1`、`true`、`yes`、`on` 表示返回 IP 质量 / 纯净度评分。默认由 `quality.include_default` 决定。 |
 | `online_enrichment` | 否 | 在线增强模式：`fast`、`wait`、`off`。默认 `fast`。 |
 
 ### online_enrichment
@@ -56,6 +57,12 @@ curl "http://127.0.0.1:18080/api/lookup?query=223.119.20.239&include_location=1&
 curl "http://127.0.0.1:18080/api/lookup?query=223.119.20.239&online_enrichment=off"
 ```
 
+返回质量评分：
+
+```bash
+curl "http://127.0.0.1:18080/api/lookup?query=1.2.3.4&include_quality=1"
+```
+
 查询 ASN：
 
 ```bash
@@ -77,6 +84,7 @@ curl "http://127.0.0.1:18080/api/lookup?query=AS15169"
 | `inferred_scene` / `inferred_scene_name` | 推断用途。 |
 | `confidence` | 主场景置信度。 |
 | `inferred_confidence` / `inferred_source` | 推断用途置信度和来源。 |
+| `service_policy` | 服务处置策略元数据。消费者隐私代理 / VPN 等正常用户流量会在这里标记是否建议拦截。 |
 | `evidence` | 判断依据。 |
 | `sources` | 使用的数据源。 |
 | `registration` | 在线增强信息。 |
@@ -84,6 +92,7 @@ curl "http://127.0.0.1:18080/api/lookup?query=AS15169"
 | `egress` | 机房/出口推断。 |
 | `routing_security` | RPKI / IRR / BGP 多源路由可靠性分析。 |
 | `data_quality` | 综合数据质量评分。 |
+| `ip_quality` | IP 质量 / 纯净度评分，需启用默认输出或传 `include_quality=1`。 |
 | `source_votes` | 场景判断的多源投票。 |
 | `warnings` | 路由、地理或来源冲突提示。 |
 | `location` | IP 所在地，需启用或传 `include_location=1`。 |
@@ -92,6 +101,47 @@ curl "http://127.0.0.1:18080/api/lookup?query=AS15169"
 | `db` | 当前离线库状态。 |
 
 用途融合逻辑：主规则高置信度命中时优先保留主规则，例如公共 DNS、DSL 反向 DNS、保留地址等；在线增强里的机房/出口信息会作为参考证据写入 `evidence`，`inferred_source` 会显示 `主场景规则 + 在线增强参考`。主规则低置信度时，会把主规则、RDAP / WHOIS、AI 和机房/出口推断放入 `source_votes` 做加权投票；只有多源一致且分数明显高于原结论时，才修正 `scene` 和 `inferred_scene`。
+
+### ip_quality
+
+`ip_quality` 用于风控或访问策略，不改变 `scene`。`scene` 表示技术场景，`ip_quality.recommendation` 表示建议动作。
+
+| 字段 | 说明 |
+| --- | --- |
+| `score` | 0-100，越高越干净。 |
+| `grade` | A/B/C/D/F。 |
+| `risk_level` | `low`、`medium`、`high`、`critical`。 |
+| `recommendation` | `allow`、`review`、`challenge`、`rate_limit`、`block`。 |
+| `confidence` | 评分置信度。 |
+| `labels` | 命中的质量标签，例如 `VPN`、`BLOCKLIST`、`RPKI_INVALID`。 |
+| `risk_reasons` | 扣分原因。 |
+| `positive_signals` | 正向信号。 |
+| `dimensions` | reputation、anonymity、infrastructure、routing_trust、registration、user_type 分维度评分。 |
+
+### 单独质量接口
+
+```text
+GET /api/quality
+```
+
+参数与 `/api/lookup` 一致，固定返回 `ip_quality`：
+
+```bash
+curl "http://127.0.0.1:18080/api/quality?query=1.2.3.4"
+```
+
+### service_policy
+
+`service_policy` 用于把技术场景和处置策略分开。例如 Apple iCloud Private Relay 仍属于 `PROXY`，Google Fi VPN 仍属于 `VPN`，但它们是系统级或运营商级消费者隐私服务，默认不建议直接按高风险代理封禁。
+
+| 字段 | 说明 |
+| --- | --- |
+| `service_name` | 服务名称，例如 `Apple iCloud Private Relay`。 |
+| `service_subtype` | 服务子类型，例如 `consumer_privacy_proxy`、`carrier_privacy_vpn`。 |
+| `risk_level` | 风险等级，当前可为 `low` 等。 |
+| `block_recommended` | 是否建议默认拦截。消费者隐私服务通常为 `false`。 |
+| `normal_user_traffic` | 是否更接近正常用户流量。 |
+| `rule_id` / `rule_name` | 命中的离线服务规则。 |
 
 ### routing_security
 
@@ -250,7 +300,7 @@ GET /api/admin/config
 PUT /api/admin/config
 ```
 
-当前主要用于保存 BGP 配置。示例：
+可保存后台支持的配置块，包括 BGP、在线增强、动态规则、IP2Proxy、ip2region 等。示例：
 
 ```bash
 curl -X PUT "http://127.0.0.1:18080/api/admin/config" \
@@ -265,6 +315,14 @@ curl -X PUT "http://127.0.0.1:18080/api/admin/config" \
   "ok": true,
   "restart_required": true
 }
+```
+
+动态规则来源也可以通过该接口更新，例如：
+
+```bash
+curl -X PUT "http://127.0.0.1:18080/api/admin/config" \
+  -H "Content-Type: application/json" \
+  -d '{"dynamic_rules":{"firehol_level1_url":"https://iplists.firehol.org/files/firehol_level1.netset","firehol_anonymous_url":"","az0_vpn_ip_url":"https://az0-vpnip-public.oooninja.com/ip.txt"}}'
 ```
 
 ### 查看后台状态

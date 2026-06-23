@@ -18,6 +18,7 @@
 - 支持本地规则表维护公共 DNS、STUN、爬虫、邮件、监控、风险网段等服务 IP
 - 支持 IP2Proxy 增强 `VPN`、`PROXY`、`TOR`
 - 支持 ip2region 返回 IP 所在地
+- 支持 IP 质量 / 纯净度评分，输出风险等级、扣分原因和建议动作
 - 支持 OpenAI 和 Ollama，只处理低置信度结果
 - 支持 YAML 配置文件
 - 支持 HTTPS
@@ -57,6 +58,8 @@ go run ./cmd/ipasn -config generate_firewall.yaml -generate-firewall-lists
 
 接口按需显示所在地时使用 `include_location=1`。
 
+IP 质量 / 纯净度评分默认按需输出。接口使用 `include_quality=1`，或调用单独的 `/api/quality`；需要默认输出时在 `quality.include_default` 里开启。
+
 打开页面：
 
 ```text
@@ -86,8 +89,10 @@ http://localhost:18080/admin
 ```text
 GET  /api/lookup?query=8.8.8.8
 GET  /api/lookup?query=8.8.8.8&include_location=1
+GET  /api/lookup?query=8.8.8.8&include_quality=1
 GET  /api/lookup?query=8.8.8.8&online_enrichment=wait
 GET  /api/lookup?query=AS15169
+GET  /api/quality?query=8.8.8.8
 GET  /api/health
 GET  /api/db/status
 POST /api/db/update
@@ -99,6 +104,8 @@ POST /api/admin/update
 ```
 
 `include_location=1` 会返回 IP 所在地，包含国家、省/州、城市、运营商、国家码和所在地库自带的 ASN。页面里勾选“所在地”也是同样效果。
+
+`include_quality=1` 会返回 `ip_quality`，包含 0-100 评分、A-F 等级、风险等级、建议动作、风险原因、正向信号和分维度评分。页面里勾选“IP 质量”也是同样效果；也可以直接调用 `/api/quality?query=IP`。
 
 `online_enrichment` 支持 `fast`、`wait`、`off`：`fast` 快速返回并后台刷新，`wait` 等联网增强完成或超时后返回，`off` 只使用离线库。
 
@@ -169,6 +176,8 @@ AS Path 多点观察也会随联网增强一起缓存，避免重复访问 RIPEs
 | `IOT` | 物联网 | 摄像头、网关、IoT 平台、设备云服务或物联网接入网络 IP。 |
 | `BLOCKLIST` | 风险网段 | 命中公开黑名单、DROP 列表、恶意或高风险网络的 IP。 |
 
+`scene` 表示技术场景，不直接等同于防火墙处置动作。Apple iCloud Private Relay、Google Fi VPN 这类运营商或系统级消费者隐私服务仍会归入 `PROXY` / `VPN`，但查询结果会额外返回 `service_policy`，标记为正常用户流量、低风险、默认不建议直接拦截。
+
 ## 规则维护
 
 手工规则放在：
@@ -206,11 +215,16 @@ data/generated/services.json
 - `TOR`：Tor 出口节点
 - `MAIL`：常见邮件服务 SPF 记录
 - `MON`：UptimeRobot 监控 IP
-- `BLOCKLIST`：Spamhaus DROP
+- `BLOCKLIST`：Spamhaus DROP、FireHOL level1
 - `CDN`：Cloudflare、Fastly、AWS CloudFront 官方 IP 段
 - `IDC`：AWS、Google Cloud、Azure、Oracle Cloud 官方 IP 段
 - `ORG`：GitHub 官方 Meta IP 段
+- `PROXY`：Apple iCloud Private Relay 官方出口 IP 段
+- `VPN`：Google Fi VPN、Mullvad、NordVPN、az0/vpn_ip 公开出口/中继列表
+- `PROXY`：可选 FireHOL anonymous 匿名代理聚合列表
 - `VPN` / `PROXY` / `TOR`：IP2Proxy 离线库
+
+其中 FireHOL level1 默认启用，覆盖 DShield、Feodo、fullbogons、Spamhaus DROP 等第三方风险源；az0/vpn_ip 默认启用，用于补充公开 VPN 服务 IP；FireHOL anonymous 体积较大，默认留空，按需启用。Apple iCloud Private Relay 和 Google Fi VPN 会带有消费者隐私服务策略元数据；Mullvad、NordVPN、IP2Proxy 等仍按 VPN / PROXY / TOR 风险来源处理，是否拦截应结合业务策略决定。
 
 阿里云、腾讯云、华为云、火山引擎、网宿等需要账号或 API 鉴权的来源，当前保留为后续 provider 插件接入；没有凭证时先通过 ASN 场景规则、RDAP/WHOIS、BGP 和商业库增强辅助判断。`IOT` 可以通过固定 IP、网段或反向 DNS 关键词维护。
 

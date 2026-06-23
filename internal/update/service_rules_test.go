@@ -15,6 +15,17 @@ import (
 	"ipasn/internal/config"
 )
 
+type generatedRuleForTest struct {
+	ID                string   `json:"id"`
+	Scene             string   `json:"scene"`
+	ServiceName       string   `json:"service_name"`
+	ServiceSubtype    string   `json:"service_subtype"`
+	RiskLevel         string   `json:"risk_level"`
+	BlockRecommended  *bool    `json:"block_recommended"`
+	NormalUserTraffic *bool    `json:"normal_user_traffic"`
+	Prefixes          []string `json:"prefixes"`
+}
+
 func TestRefreshDynamicServiceRulesLive(t *testing.T) {
 	if os.Getenv("LIVE_DYNAMIC_RULES") != "1" {
 		t.Skip("set LIVE_DYNAMIC_RULES=1 to refresh live dynamic service rules")
@@ -51,10 +62,7 @@ func TestRefreshDynamicServiceRulesLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	var file struct {
-		Rules []struct {
-			ID       string   `json:"id"`
-			Prefixes []string `json:"prefixes"`
-		} `json:"rules"`
+		Rules []generatedRuleForTest `json:"rules"`
 	}
 	if err := json.Unmarshal(body, &file); err != nil {
 		t.Fatal(err)
@@ -84,6 +92,15 @@ func TestRefreshDynamicServiceRulesBuildsGeneratedFile(t *testing.T) {
 	mux.HandleFunc("/drop_v6.json", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"cidr":"2001:db9::/32","sblid":"SBL2"}`))
 	})
+	mux.HandleFunc("/firehol-level1.netset", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("# firehol level1\n203.0.116.0/24\n198.51.100.10\n"))
+	})
+	mux.HandleFunc("/firehol-anonymous.netset", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("# firehol anonymous\n203.0.117.0/24\n2001:db9:2::/48\n"))
+	})
+	mux.HandleFunc("/az0-vpn-ip.txt", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("# az0 vpn_ip\n198.51.101.1 # protonvpn\n2001:db9:3::1 # vpn\n"))
+	})
 	mux.HandleFunc("/cloudflare-v4.txt", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("173.245.48.0/20\n198.41.128.0/17\n"))
 	})
@@ -105,6 +122,28 @@ func TestRefreshDynamicServiceRulesBuildsGeneratedFile(t *testing.T) {
 	mux.HandleFunc("/azure-tags.json", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"values":[{"name":"AzureFrontDoor","properties":{"addressPrefixes":["13.107.42.0/24","2620:1ec:21::/48"]}}]}`))
 	})
+	mux.HandleFunc("/apple-private-relay.csv", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(strings.Join([]string{
+			"172.224.226.0/28,GB,GB-EN,London,",
+			"172.224.226.16/28,GB,GB-EN,London,",
+			"2a01:b740::/48,GB,GB-EN,London,",
+		}, "\n")))
+	})
+	mux.HandleFunc("/google-fi.txt", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("# Google Fi VPN Geofeed\n136.22.118.0/29,AT,,,\n2600:1900:4000::/48,US,,,\n"))
+	})
+	mux.HandleFunc("/mullvad.json", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"hostname":"al-tia-wg-001","active":true,"ipv4_addr_in":"103.124.165.2","ipv6_addr_in":"2a04:27c0:0:e::f001"},
+			{"hostname":"disabled","active":false,"ipv4_addr_in":"198.51.100.10","ipv6_addr_in":"2001:db8::10"}
+		]`))
+	})
+	mux.HandleFunc("/nordvpn.json", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"hostname":"pl128.nordvpn.com","status":"online","station":"194.99.105.99","ipv6_station":"2a0d:5600:1::1"},
+			{"hostname":"offline.nordvpn.com","status":"offline","station":"198.51.100.20"}
+		]`))
+	})
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 
@@ -117,6 +156,9 @@ func TestRefreshDynamicServiceRulesBuildsGeneratedFile(t *testing.T) {
 	cfg.DynamicRules.UptimeRobotURL = server.URL + "/uptimerobot.txt"
 	cfg.DynamicRules.SpamhausDropV4URL = server.URL + "/drop_v4.json"
 	cfg.DynamicRules.SpamhausDropV6URL = server.URL + "/drop_v6.json"
+	cfg.DynamicRules.FireHOLLevel1URL = server.URL + "/firehol-level1.netset"
+	cfg.DynamicRules.FireHOLAnonymousURL = server.URL + "/firehol-anonymous.netset"
+	cfg.DynamicRules.Az0VPNIPURL = server.URL + "/az0-vpn-ip.txt"
 	cfg.DynamicRules.CloudflareV4URL = server.URL + "/cloudflare-v4.txt"
 	cfg.DynamicRules.CloudflareV6URL = server.URL + "/cloudflare-v6.txt"
 	cfg.DynamicRules.FastlyURL = server.URL + "/fastly.json"
@@ -125,6 +167,10 @@ func TestRefreshDynamicServiceRulesBuildsGeneratedFile(t *testing.T) {
 	cfg.DynamicRules.OracleIPRangesURL = server.URL + "/oracle.json"
 	cfg.DynamicRules.AzureServiceTagsURL = server.URL + "/azure-tags.json"
 	cfg.DynamicRules.GitHubMetaURL = ""
+	cfg.DynamicRules.ApplePrivateRelayURL = server.URL + "/apple-private-relay.csv"
+	cfg.DynamicRules.GoogleFiVPNGeofeedURL = server.URL + "/google-fi.txt"
+	cfg.DynamicRules.MullvadRelaysURL = server.URL + "/mullvad.json"
+	cfg.DynamicRules.NordVPNServersURL = server.URL + "/nordvpn.json"
 	cfg.DynamicRules.MailSPFDomains = []string{"_spf.example.test"}
 	cfg.DynamicRules.IP2Proxy.Enabled = true
 	cfg.DynamicRules.IP2Proxy.LocalFile = filepath.Join(cfg.DataDir, "ip2proxy.csv")
@@ -160,11 +206,7 @@ func TestRefreshDynamicServiceRulesBuildsGeneratedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	var file struct {
-		Rules []struct {
-			ID       string   `json:"id"`
-			Scene    string   `json:"scene"`
-			Prefixes []string `json:"prefixes"`
-		} `json:"rules"`
+		Rules []generatedRuleForTest `json:"rules"`
 	}
 	if err := json.Unmarshal(body, &file); err != nil {
 		t.Fatal(err)
@@ -177,12 +219,19 @@ func TestRefreshDynamicServiceRulesBuildsGeneratedFile(t *testing.T) {
 		"dynamic-mail-spf":                   "MAIL",
 		"dynamic-mon-uptimerobot":            "MON",
 		"dynamic-blocklist-spamhaus-drop":    "BLOCKLIST",
+		"dynamic-blocklist-firehol-level1":   "BLOCKLIST",
+		"dynamic-proxy-firehol-anonymous":    "PROXY",
+		"dynamic-vpn-az0-vpn-ip":             "VPN",
 		"dynamic-ip2proxy-vpn":               "VPN",
 		"dynamic-ip2proxy-proxy":             "PROXY",
 		"dynamic-ip2proxy-tor":               "TOR",
 		"dynamic-cdn-cloudflare":             "CDN",
 		"dynamic-cdn-fastly":                 "CDN",
 		"dynamic-cdn-aws-cloudfront":         "CDN",
+		"dynamic-proxy-apple-private-relay":  "PROXY",
+		"dynamic-vpn-google-fi":              "VPN",
+		"dynamic-vpn-mullvad":                "VPN",
+		"dynamic-vpn-nordvpn":                "VPN",
 		"dynamic-idc-aws":                    "IDC",
 		"dynamic-idc-google-cloud":           "IDC",
 		"dynamic-idc-azure":                  "IDC",
@@ -232,8 +281,52 @@ func TestRefreshDynamicServiceRulesBuildsGeneratedFile(t *testing.T) {
 	if !generatedRuleHasPrefix(file.Rules, "dynamic-cdn-aws-cloudfront", "2600:9000::/28") {
 		t.Fatalf("AWS CloudFront rule did not include IPv6 prefix")
 	}
+	if !generatedRuleHasPrefix(file.Rules, "dynamic-blocklist-firehol-level1", "203.0.116.0/24") {
+		t.Fatalf("FireHOL level1 rule did not include IPv4 prefix")
+	}
+	if !generatedRuleHasPrefix(file.Rules, "dynamic-blocklist-firehol-level1", "198.51.100.10/32") {
+		t.Fatalf("FireHOL level1 rule did not normalize bare IPv4 address")
+	}
+	if !generatedRuleHasPrefix(file.Rules, "dynamic-proxy-firehol-anonymous", "203.0.117.0/24") {
+		t.Fatalf("FireHOL anonymous rule did not include IPv4 prefix")
+	}
+	if !generatedRuleHasPrefix(file.Rules, "dynamic-proxy-firehol-anonymous", "2001:db9:2::/48") {
+		t.Fatalf("FireHOL anonymous rule did not include IPv6 prefix")
+	}
+	if !generatedRuleHasPrefix(file.Rules, "dynamic-vpn-az0-vpn-ip", "198.51.101.1/32") {
+		t.Fatalf("az0/vpn_ip rule did not include IPv4 address")
+	}
+	if !generatedRuleHasPrefix(file.Rules, "dynamic-vpn-az0-vpn-ip", "2001:db9:3::1/128") {
+		t.Fatalf("az0/vpn_ip rule did not include IPv6 address")
+	}
 	if !generatedRuleHasPrefix(file.Rules, "dynamic-idc-azure", "13.107.42.0/24") {
 		t.Fatalf("Azure rule did not include service tag prefix")
+	}
+	if !generatedRuleHasPrefix(file.Rules, "dynamic-proxy-apple-private-relay", "172.224.226.0/27") {
+		t.Fatalf("Apple Private Relay rule did not coalesce adjacent IPv4 prefixes")
+	}
+	if !generatedRuleHasPrefix(file.Rules, "dynamic-proxy-apple-private-relay", "2a01:b740::/48") {
+		t.Fatalf("Apple Private Relay rule did not include IPv6 prefix")
+	}
+	if !generatedRuleHasPrefix(file.Rules, "dynamic-vpn-google-fi", "136.22.118.0/29") {
+		t.Fatalf("Google Fi VPN rule did not include IPv4 prefix")
+	}
+	if !generatedRuleHasPrefix(file.Rules, "dynamic-vpn-google-fi", "2600:1900:4000::/48") {
+		t.Fatalf("Google Fi VPN rule did not include IPv6 prefix")
+	}
+	assertConsumerPrivacyPolicy(t, file.Rules, "dynamic-proxy-apple-private-relay", "Apple iCloud Private Relay", "consumer_privacy_proxy")
+	assertConsumerPrivacyPolicy(t, file.Rules, "dynamic-vpn-google-fi", "Google Fi VPN", "carrier_privacy_vpn")
+	if !generatedRuleHasPrefix(file.Rules, "dynamic-vpn-mullvad", "103.124.165.2/32") {
+		t.Fatalf("Mullvad rule did not include active IPv4 relay")
+	}
+	if generatedRuleHasPrefix(file.Rules, "dynamic-vpn-mullvad", "198.51.100.10/32") {
+		t.Fatalf("Mullvad rule included inactive relay")
+	}
+	if !generatedRuleHasPrefix(file.Rules, "dynamic-vpn-nordvpn", "194.99.105.99/32") {
+		t.Fatalf("NordVPN rule did not include online IPv4 station")
+	}
+	if generatedRuleHasPrefix(file.Rules, "dynamic-vpn-nordvpn", "198.51.100.20/32") {
+		t.Fatalf("NordVPN rule included offline station")
 	}
 }
 
@@ -262,6 +355,9 @@ func TestRefreshDynamicServiceRulesCombinesMultipleIP2ProxySources(t *testing.T)
 	cfg.DynamicRules.UptimeRobotURL = ""
 	cfg.DynamicRules.SpamhausDropV4URL = ""
 	cfg.DynamicRules.SpamhausDropV6URL = ""
+	cfg.DynamicRules.FireHOLLevel1URL = ""
+	cfg.DynamicRules.FireHOLAnonymousURL = ""
+	cfg.DynamicRules.Az0VPNIPURL = ""
 	cfg.DynamicRules.CloudflareV4URL = ""
 	cfg.DynamicRules.CloudflareV6URL = ""
 	cfg.DynamicRules.FastlyURL = ""
@@ -270,6 +366,10 @@ func TestRefreshDynamicServiceRulesCombinesMultipleIP2ProxySources(t *testing.T)
 	cfg.DynamicRules.AzureServiceTagsURL = ""
 	cfg.DynamicRules.OracleIPRangesURL = ""
 	cfg.DynamicRules.GitHubMetaURL = ""
+	cfg.DynamicRules.ApplePrivateRelayURL = ""
+	cfg.DynamicRules.GoogleFiVPNGeofeedURL = ""
+	cfg.DynamicRules.MullvadRelaysURL = ""
+	cfg.DynamicRules.NordVPNServersURL = ""
 	cfg.DynamicRules.MailSPFDomains = nil
 	cfg.DynamicRules.IP2Proxy.Enabled = true
 	cfg.DynamicRules.IP2Proxy.DownloadURL = server.URL + "/ip2proxy.zip"
@@ -285,11 +385,7 @@ func TestRefreshDynamicServiceRulesCombinesMultipleIP2ProxySources(t *testing.T)
 		t.Fatal(err)
 	}
 	var file struct {
-		Rules []struct {
-			ID       string   `json:"id"`
-			Scene    string   `json:"scene"`
-			Prefixes []string `json:"prefixes"`
-		} `json:"rules"`
+		Rules []generatedRuleForTest `json:"rules"`
 	}
 	if err := json.Unmarshal(body, &file); err != nil {
 		t.Fatal(err)
@@ -319,6 +415,9 @@ func TestRefreshDynamicServiceRulesRetainsPreviousRuleOnSourceFailure(t *testing
 	cfg.DynamicRules.UptimeRobotURL = ""
 	cfg.DynamicRules.SpamhausDropV4URL = ""
 	cfg.DynamicRules.SpamhausDropV6URL = ""
+	cfg.DynamicRules.FireHOLLevel1URL = ""
+	cfg.DynamicRules.FireHOLAnonymousURL = ""
+	cfg.DynamicRules.Az0VPNIPURL = ""
 	cfg.DynamicRules.CloudflareV4URL = ""
 	cfg.DynamicRules.CloudflareV6URL = ""
 	cfg.DynamicRules.FastlyURL = ""
@@ -327,6 +426,10 @@ func TestRefreshDynamicServiceRulesRetainsPreviousRuleOnSourceFailure(t *testing
 	cfg.DynamicRules.AzureServiceTagsURL = ""
 	cfg.DynamicRules.OracleIPRangesURL = ""
 	cfg.DynamicRules.GitHubMetaURL = ""
+	cfg.DynamicRules.ApplePrivateRelayURL = ""
+	cfg.DynamicRules.GoogleFiVPNGeofeedURL = ""
+	cfg.DynamicRules.MullvadRelaysURL = ""
+	cfg.DynamicRules.NordVPNServersURL = ""
 	cfg.DynamicRules.MailSPFDomains = nil
 	cfg.DynamicRules.IP2Proxy.Enabled = false
 
@@ -363,12 +466,8 @@ func TestRefreshDynamicServiceRulesRetainsPreviousRuleOnSourceFailure(t *testing
 		t.Fatal(err)
 	}
 	var file struct {
-		SourceErrors []string `json:"source_errors"`
-		Rules        []struct {
-			ID       string   `json:"id"`
-			Scene    string   `json:"scene"`
-			Prefixes []string `json:"prefixes"`
-		} `json:"rules"`
+		SourceErrors []string               `json:"source_errors"`
+		Rules        []generatedRuleForTest `json:"rules"`
 	}
 	if err := json.Unmarshal(body, &file); err != nil {
 		t.Fatal(err)
@@ -381,15 +480,31 @@ func TestRefreshDynamicServiceRulesRetainsPreviousRuleOnSourceFailure(t *testing
 	}
 }
 
-func generatedRuleHasPrefix(rules []struct {
-	ID       string   `json:"id"`
-	Scene    string   `json:"scene"`
-	Prefixes []string `json:"prefixes"`
-}, id string, prefix string) bool {
+func generatedRuleHasPrefix(rules []generatedRuleForTest, id string, prefix string) bool {
 	for _, rule := range rules {
 		if rule.ID == id {
 			return slices.Contains(rule.Prefixes, prefix)
 		}
 	}
 	return false
+}
+
+func assertConsumerPrivacyPolicy(t *testing.T, rules []generatedRuleForTest, id, serviceName, subtype string) {
+	t.Helper()
+	for _, rule := range rules {
+		if rule.ID != id {
+			continue
+		}
+		if rule.ServiceName != serviceName || rule.ServiceSubtype != subtype || rule.RiskLevel != "low" {
+			t.Fatalf("unexpected consumer privacy policy for %s: %#v", id, rule)
+		}
+		if rule.BlockRecommended == nil || *rule.BlockRecommended {
+			t.Fatalf("expected %s to default to no block recommendation, got %#v", id, rule.BlockRecommended)
+		}
+		if rule.NormalUserTraffic == nil || !*rule.NormalUserTraffic {
+			t.Fatalf("expected %s to mark normal user traffic, got %#v", id, rule.NormalUserTraffic)
+		}
+		return
+	}
+	t.Fatalf("missing generated rule %s", id)
 }

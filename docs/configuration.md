@@ -167,6 +167,28 @@ http://127.0.0.1:18080/admin
 
 后台可以查看和保存 BGP 配置、触发离线库更新、查看数据库状态。保存配置会写回 `config.yaml`；监听端口、TLS 等启动级配置需要重启后生效。
 
+## IP 质量评分
+
+```yaml
+quality:
+  enabled: true
+  include_default: false
+  ai_low_confidence: true
+  low_confidence_threshold: 0.6
+  allow_score: 80
+  review_score: 60
+  challenge_score: 40
+  rate_limit_score: 20
+```
+
+- `enabled`：是否启用 IP 质量 / 纯净度评分。
+- `include_default`：是否默认在 `/api/lookup` 输出 `ip_quality`。关闭时可通过 `include_quality=1` 或 `/api/quality` 获取。
+- `ai_low_confidence`：预留给低置信度结果的 AI 辅助开关；第一版评分主逻辑仍以离线规则和多源证据为准。
+- `low_confidence_threshold`：低置信度阈值。
+- `allow_score`、`review_score`、`challenge_score`、`rate_limit_score`：建议动作阈值。低于 `rate_limit_score` 时建议 `block`。
+
+评分结果中的 `score` 为 0-100，越高越干净；`recommendation` 是策略建议，不会直接改变 `scene`。
+
 ## 动态规则
 
 ```yaml
@@ -179,6 +201,9 @@ dynamic_rules:
   uptimerobot_ip_url: "https://cdn.uptimerobot.com/api/IPv4andIPv6.txt"
   spamhaus_drop_v4_url: "https://www.spamhaus.org/drop/drop_v4.json"
   spamhaus_drop_v6_url: "https://www.spamhaus.org/drop/drop_v6.json"
+  firehol_level1_url: "https://iplists.firehol.org/files/firehol_level1.netset"
+  firehol_anonymous_url: ""
+  az0_vpn_ip_url: "https://az0-vpnip-public.oooninja.com/ip.txt"
   cloudflare_v4_url: "https://www.cloudflare.com/ips-v4"
   cloudflare_v6_url: "https://www.cloudflare.com/ips-v6"
   fastly_url: "https://api.fastly.com/public-ip-list"
@@ -187,6 +212,10 @@ dynamic_rules:
   azure_service_tags_url: "https://www.microsoft.com/en-us/download/confirmation.aspx?id=56519"
   oracle_ip_ranges_url: "https://docs.oracle.com/en-us/iaas/tools/public_ip_ranges.json"
   github_meta_url: "https://api.github.com/meta"
+  apple_private_relay_url: "https://mask-api.icloud.com/egress-ip-ranges.csv"
+  google_fi_vpn_geofeed_url: "https://www.gstatic.com/fi/bridge/ipgeofeed.txt"
+  mullvad_relays_url: "https://api.mullvad.net/www/relays/all/"
+  nordvpn_servers_url: "https://api.nordvpn.com/v1/servers"
   mail_spf_domains:
     - "_spf.google.com"
     - "spf.protection.outlook.com"
@@ -204,6 +233,13 @@ dynamic_rules:
 - `aws_ip_ranges_url`：AWS 官方 IP 段，生成 AWS 总体 `IDC` 规则，并把 `CLOUDFRONT` service 单独生成高置信度 `CDN` 规则。
 - `google_cloud_ip_ranges_url`、`azure_service_tags_url`、`oracle_ip_ranges_url`：云厂商官方 IP 段，生成 `IDC` 规则。
 - `github_meta_url`：GitHub 官方 Meta IP 段，生成 `ORG` 规则。
+- `firehol_level1_url`：FireHOL level1 聚合风险网段，包含 DShield、Feodo、fullbogons、Spamhaus DROP 等来源，生成 `BLOCKLIST` 规则。
+- `firehol_anonymous_url`：FireHOL anonymous 匿名代理/Tor 聚合网段，生成 `PROXY` 规则。该列表体积很大，默认留空，只有需要扩大匿名代理覆盖时再启用。
+- `az0_vpn_ip_url`：az0/vpn_ip 公开 VPN IP 列表，生成 `VPN` 规则。该来源覆盖 ProtonVPN、Windscribe、Browsec、VeePN、Hoxx 等公开整理的 VPN / Proxy 服务 IP。
+- `apple_private_relay_url`：Apple iCloud Private Relay 官方出口 CSV，生成高置信度 `PROXY` 规则。该列表较大，程序会先合并相邻 CIDR 再写入规则文件。
+- `google_fi_vpn_geofeed_url`：Google Fi VPN geofeed，生成 `VPN` 规则。
+- `mullvad_relays_url`：Mullvad relay API，生成 active relay 的 `VPN` 规则。
+- `nordvpn_servers_url`：NordVPN servers API，生成在线服务器的 `VPN` 规则；不需要该第三方来源时可以置空。
 - `mail_spf_domains`：邮件服务域名，程序会解析 SPF 生成邮件 IP 规则。
 - `ip2proxy.local_files`：本地 IP2Proxy 文件。
 - `ip2proxy.download_urls`：完整下载地址。

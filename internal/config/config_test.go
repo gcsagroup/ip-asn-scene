@@ -57,6 +57,13 @@ func TestLoadDynamicRulesFromEnv(t *testing.T) {
 	t.Setenv("UPTIMEROBOT_IP_URL", "https://example.test/uptimerobot.txt")
 	t.Setenv("SPAMHAUS_DROP_V4_URL", "https://example.test/drop_v4.json")
 	t.Setenv("SPAMHAUS_DROP_V6_URL", "https://example.test/drop_v6.json")
+	t.Setenv("FIREHOL_LEVEL1_URL", "https://example.test/firehol_level1.netset")
+	t.Setenv("FIREHOL_ANONYMOUS_URL", "https://example.test/firehol_anonymous.netset")
+	t.Setenv("AZ0_VPN_IP_URL", "https://example.test/az0-vpn-ip.txt")
+	t.Setenv("APPLE_PRIVATE_RELAY_URL", "https://example.test/apple-private-relay.csv")
+	t.Setenv("GOOGLE_FI_VPN_GEOFEED_URL", "https://example.test/google-fi.txt")
+	t.Setenv("MULLVAD_RELAYS_URL", "https://example.test/mullvad.json")
+	t.Setenv("NORDVPN_SERVERS_URL", "https://example.test/nordvpn.json")
 	t.Setenv("MAIL_SPF_DOMAINS", "_spf.example.test, spf.mail.example.test")
 	t.Setenv("IP2PROXY_ENABLED", "1")
 	t.Setenv("IP2PROXY_LOCAL_FILE", "data/raw/ip2proxy.csv")
@@ -92,6 +99,27 @@ func TestLoadDynamicRulesFromEnv(t *testing.T) {
 	if cfg.DynamicRules.SpamhausDropV6URL != "https://example.test/drop_v6.json" {
 		t.Fatalf("unexpected Spamhaus IPv6 URL: %q", cfg.DynamicRules.SpamhausDropV6URL)
 	}
+	if cfg.DynamicRules.FireHOLLevel1URL != "https://example.test/firehol_level1.netset" {
+		t.Fatalf("unexpected FireHOL level1 URL: %q", cfg.DynamicRules.FireHOLLevel1URL)
+	}
+	if cfg.DynamicRules.FireHOLAnonymousURL != "https://example.test/firehol_anonymous.netset" {
+		t.Fatalf("unexpected FireHOL anonymous URL: %q", cfg.DynamicRules.FireHOLAnonymousURL)
+	}
+	if cfg.DynamicRules.Az0VPNIPURL != "https://example.test/az0-vpn-ip.txt" {
+		t.Fatalf("unexpected az0/vpn_ip URL: %q", cfg.DynamicRules.Az0VPNIPURL)
+	}
+	if cfg.DynamicRules.ApplePrivateRelayURL != "https://example.test/apple-private-relay.csv" {
+		t.Fatalf("unexpected Apple Private Relay URL: %q", cfg.DynamicRules.ApplePrivateRelayURL)
+	}
+	if cfg.DynamicRules.GoogleFiVPNGeofeedURL != "https://example.test/google-fi.txt" {
+		t.Fatalf("unexpected Google Fi VPN geofeed URL: %q", cfg.DynamicRules.GoogleFiVPNGeofeedURL)
+	}
+	if cfg.DynamicRules.MullvadRelaysURL != "https://example.test/mullvad.json" {
+		t.Fatalf("unexpected Mullvad relays URL: %q", cfg.DynamicRules.MullvadRelaysURL)
+	}
+	if cfg.DynamicRules.NordVPNServersURL != "https://example.test/nordvpn.json" {
+		t.Fatalf("unexpected NordVPN servers URL: %q", cfg.DynamicRules.NordVPNServersURL)
+	}
 	if len(cfg.DynamicRules.MailSPFDomains) != 2 || cfg.DynamicRules.MailSPFDomains[0] != "_spf.example.test" || cfg.DynamicRules.MailSPFDomains[1] != "spf.mail.example.test" {
 		t.Fatalf("unexpected SPF domains: %#v", cfg.DynamicRules.MailSPFDomains)
 	}
@@ -118,6 +146,34 @@ func TestLoadDynamicRulesFromEnv(t *testing.T) {
 	}
 	if len(cfg.DynamicRules.IP2Proxy.Packages) != 2 || cfg.DynamicRules.IP2Proxy.Packages[1] != "PX11_IPV6" {
 		t.Fatalf("unexpected IP2Proxy packages: %#v", cfg.DynamicRules.IP2Proxy.Packages)
+	}
+}
+
+func TestLoadQualityFromEnv(t *testing.T) {
+	t.Setenv("QUALITY_ENABLED", "0")
+	t.Setenv("QUALITY_INCLUDE_DEFAULT", "1")
+	t.Setenv("QUALITY_AI_LOW_CONFIDENCE", "0")
+	t.Setenv("QUALITY_LOW_CONFIDENCE_THRESHOLD", "0.51")
+	t.Setenv("QUALITY_ALLOW_SCORE", "85")
+	t.Setenv("QUALITY_REVIEW_SCORE", "70")
+	t.Setenv("QUALITY_CHALLENGE_SCORE", "45")
+	t.Setenv("QUALITY_RATE_LIMIT_SCORE", "25")
+
+	cfg := Load()
+	if cfg.Quality.Enabled {
+		t.Fatal("expected quality to be disabled from env")
+	}
+	if !cfg.Quality.IncludeDefault {
+		t.Fatal("expected quality include_default from env")
+	}
+	if cfg.Quality.AILowConfidence {
+		t.Fatal("expected low-confidence AI to be disabled from env")
+	}
+	if cfg.Quality.LowConfidenceThreshold != 0.51 {
+		t.Fatalf("unexpected low-confidence threshold: %f", cfg.Quality.LowConfidenceThreshold)
+	}
+	if cfg.Quality.AllowScore != 85 || cfg.Quality.ReviewScore != 70 || cfg.Quality.ChallengeScore != 45 || cfg.Quality.RateLimitScore != 25 {
+		t.Fatalf("unexpected quality thresholds: %#v", cfg.Quality)
 	}
 }
 
@@ -282,6 +338,18 @@ func TestDefaultIncludesMaintainedReliabilitySources(t *testing.T) {
 	if len(cfg.Sources.BGPObservationURLs) != 0 {
 		t.Fatalf("BGP observation URL defaults should stay empty because full BGP mode generates them locally: %#v", cfg.Sources.BGPObservationURLs)
 	}
+	if cfg.DynamicRules.ApplePrivateRelayURL != "https://mask-api.icloud.com/egress-ip-ranges.csv" {
+		t.Fatalf("unexpected Apple Private Relay default: %q", cfg.DynamicRules.ApplePrivateRelayURL)
+	}
+	if cfg.DynamicRules.GoogleFiVPNGeofeedURL != "https://www.gstatic.com/fi/bridge/ipgeofeed.txt" {
+		t.Fatalf("unexpected Google Fi VPN default: %q", cfg.DynamicRules.GoogleFiVPNGeofeedURL)
+	}
+	if cfg.DynamicRules.MullvadRelaysURL != "https://api.mullvad.net/www/relays/all/" {
+		t.Fatalf("unexpected Mullvad default: %q", cfg.DynamicRules.MullvadRelaysURL)
+	}
+	if cfg.DynamicRules.NordVPNServersURL != "https://api.nordvpn.com/v1/servers" {
+		t.Fatalf("unexpected NordVPN default: %q", cfg.DynamicRules.NordVPNServersURL)
+	}
 }
 
 func TestYAMLEmptyReliabilitySourcesOverrideDefaults(t *testing.T) {
@@ -402,6 +470,10 @@ ip2region:
 dynamic_rules:
   enabled: false
   file: "data/generated/custom.json"
+  apple_private_relay_url: "https://example.test/apple.csv"
+  google_fi_vpn_geofeed_url: "https://example.test/google-fi.txt"
+  mullvad_relays_url: "https://example.test/mullvad.json"
+  nordvpn_servers_url: "https://example.test/nordvpn.json"
   mail_spf_domains:
     - "_spf.example.test"
   ip2proxy:
@@ -465,6 +537,12 @@ sources:
 	}
 	if cfg.DynamicRules.Enabled || cfg.DynamicRules.File != "data/generated/custom.json" || len(cfg.DynamicRules.MailSPFDomains) != 1 {
 		t.Fatalf("unexpected dynamic rules config: %#v", cfg.DynamicRules)
+	}
+	if cfg.DynamicRules.ApplePrivateRelayURL != "https://example.test/apple.csv" || cfg.DynamicRules.GoogleFiVPNGeofeedURL != "https://example.test/google-fi.txt" {
+		t.Fatalf("unexpected privacy relay dynamic config: %#v", cfg.DynamicRules)
+	}
+	if cfg.DynamicRules.MullvadRelaysURL != "https://example.test/mullvad.json" || cfg.DynamicRules.NordVPNServersURL != "https://example.test/nordvpn.json" {
+		t.Fatalf("unexpected VPN provider dynamic config: %#v", cfg.DynamicRules)
 	}
 	if !cfg.DynamicRules.IP2Proxy.Enabled || len(cfg.DynamicRules.IP2Proxy.LocalFiles) != 2 {
 		t.Fatalf("unexpected ip2proxy config: %#v", cfg.DynamicRules.IP2Proxy)

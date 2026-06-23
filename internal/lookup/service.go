@@ -16,6 +16,7 @@ import (
 	"ipasn/internal/classify"
 	"ipasn/internal/enrich"
 	"ipasn/internal/geo"
+	"ipasn/internal/quality"
 	"ipasn/internal/store"
 )
 
@@ -77,6 +78,7 @@ type Result struct {
 	InferredSceneName  string                         `json:"inferred_scene_name,omitempty"`
 	InferredConfidence float64                        `json:"inferred_confidence,omitempty"`
 	InferredSource     string                         `json:"inferred_source,omitempty"`
+	ServicePolicy      *classify.ServicePolicy        `json:"service_policy,omitempty"`
 	Confidence         float64                        `json:"confidence,omitempty"`
 	Evidence           []string                       `json:"evidence,omitempty"`
 	Sources            []string                       `json:"sources,omitempty"`
@@ -92,6 +94,7 @@ type Result struct {
 	Prefixes           []string                       `json:"prefixes,omitempty"`
 	Location           *geo.Location                  `json:"location,omitempty"`
 	AI                 *AIInfo                        `json:"ai,omitempty"`
+	Quality            *quality.Result                `json:"ip_quality,omitempty"`
 	DB                 store.Status                   `json:"db"`
 	Error              string                         `json:"error,omitempty"`
 	Extra              map[string]string              `json:"extra,omitempty"`
@@ -127,6 +130,7 @@ type Service struct {
 	enricher           Enricher
 	geoLocator         geo.Locator
 	aiConfidenceCutoff float64
+	qualityConfig      quality.Config
 }
 
 type reverseDNSEntry struct {
@@ -158,10 +162,12 @@ type Options struct {
 	Enricher           Enricher
 	GeoLocator         geo.Locator
 	AIConfidenceCutoff float64
+	QualityConfig      quality.Config
 }
 
 type LookupOptions struct {
 	IncludeLocation  bool
+	IncludeQuality   bool
 	OnlineEnrichment OnlineEnrichmentMode
 }
 
@@ -192,7 +198,11 @@ func NewServiceFromProviderWithOptions(provider SnapshotProvider, options Option
 	if cutoff <= 0 {
 		cutoff = 0.7
 	}
-	return &Service{provider: provider, aiAdvisor: options.AIAdvisor, enricher: options.Enricher, geoLocator: options.GeoLocator, aiConfidenceCutoff: cutoff}
+	qualityConfig := options.QualityConfig
+	if qualityConfig.AllowScore == 0 && qualityConfig.ReviewScore == 0 && qualityConfig.ChallengeScore == 0 && qualityConfig.RateLimitScore == 0 {
+		qualityConfig = quality.DefaultConfig()
+	}
+	return &Service{provider: provider, aiAdvisor: options.AIAdvisor, enricher: options.Enricher, geoLocator: options.GeoLocator, aiConfidenceCutoff: cutoff, qualityConfig: qualityConfig}
 }
 
 func (p *staticProvider) Snapshot() *store.Snapshot {
@@ -224,7 +234,7 @@ func (s *Service) LookupWithOptions(ctx context.Context, query string, options L
 
 	asn, ok := parseASNQuery(query)
 	if ok {
-		return s.lookupASN(ctx, snapshot, query, asn)
+		return s.lookupASN(ctx, snapshot, query, asn, options)
 	}
 
 	return Result{OK: false, Query: query, DB: snapshot.Status, Error: "query must be an IP or ASN"}
@@ -233,17 +243,20 @@ func (s *Service) LookupWithOptions(ctx context.Context, query string, options L
 func (s *Service) lookupIP(ctx context.Context, snapshot *store.Snapshot, query string, addr netip.Addr, options LookupOptions) Result {
 	classification := classify.Classify(classify.Input{IP: addr})
 	if classification.Scene == "BOGON" {
-		return Result{
-			OK:         true,
-			Query:      query,
-			QueryType:  "ip",
-			IP:         addr.String(),
-			Scene:      classification.Scene,
-			SceneName:  classification.SceneName,
-			Confidence: classification.Confidence,
-			Evidence:   classification.Evidence,
-			DB:         snapshot.Status,
+		result := Result{
+			OK:            true,
+			Query:         query,
+			QueryType:     "ip",
+			IP:            addr.String(),
+			Scene:         classification.Scene,
+			SceneName:     classification.SceneName,
+			ServicePolicy: classification.ServicePolicy,
+			Confidence:    classification.Confidence,
+			Evidence:      classification.Evidence,
+			DB:            snapshot.Status,
 		}
+		s.attachQuality(&result, options)
+		return result
 	}
 
 	prefix, ok := snapshot.Prefixes.Lookup(addr)
@@ -348,6 +361,7 @@ func (s *Service) lookupIP(ctx context.Context, snapshot *store.Snapshot, query 
 		InferredSceneName:  inferredSceneName,
 		InferredConfidence: inferredConfidence,
 		InferredSource:     inferredSource,
+		ServicePolicy:      classification.ServicePolicy,
 		Confidence:         classification.Confidence,
 		Evidence:           evidence,
 		Sources:            sources,
@@ -368,6 +382,7 @@ func (s *Service) lookupIP(ctx context.Context, snapshot *store.Snapshot, query 
 	attachRoutingReliability(snapshot, &result)
 	attachSourceVotes(&result)
 	attachDataQuality(&result)
+	s.attachQuality(&result, options)
 	return result
 }
 
@@ -458,6 +473,7 @@ func (s *Service) lookupAllocationFallback(ctx context.Context, snapshot *store.
 		InferredSceneName:  inferredSceneName,
 		InferredConfidence: inferredConfidence,
 		InferredSource:     inferredSource,
+		ServicePolicy:      classification.ServicePolicy,
 		Confidence:         confidence,
 		Evidence:           evidence,
 		Sources:            sources,
@@ -477,7 +493,52 @@ func (s *Service) lookupAllocationFallback(ctx context.Context, snapshot *store.
 	attachRoutingReliability(snapshot, &result)
 	attachSourceVotes(&result)
 	attachDataQuality(&result)
+	s.attachQuality(&result, options)
 	return result
+}
+
+func (s *Service) attachQuality(result *Result, options LookupOptions) {
+	if result == nil || !result.OK || !options.IncludeQuality || !s.qualityConfig.Enabled {
+		return
+	}
+	qualityResult := quality.Evaluate(qualityInputFromResult(result), s.qualityConfig)
+	result.Quality = &qualityResult
+}
+
+func qualityInputFromResult(result *Result) quality.Input {
+	input := quality.Input{
+		QueryType:          result.QueryType,
+		IP:                 result.IP,
+		ASN:                result.ASN,
+		Scene:              result.Scene,
+		SceneName:          result.SceneName,
+		InferredScene:      result.InferredScene,
+		InferredSceneName:  result.InferredSceneName,
+		Confidence:         result.Confidence,
+		InferredConfidence: result.InferredConfidence,
+		RoutingStatus:      result.RoutingStatus,
+		AllocationStatus:   result.AllocationStatus,
+		Evidence:           result.Evidence,
+		ServicePolicy:      result.ServicePolicy,
+		Registration:       result.Registration,
+		GeoConsistency:     result.GeoConsistency,
+	}
+	if result.Egress != nil {
+		input.Egress = &quality.EgressInput{Type: result.Egress.Type, Confidence: result.Egress.Confidence}
+	}
+	if result.RoutingSecurity != nil {
+		input.RoutingSecurity = &quality.RoutingSecurityInput{
+			RPKI:               result.RoutingSecurity.RPKI,
+			IRRConflict:        result.RoutingSecurity.IRRConflict,
+			MOAS:               result.RoutingSecurity.MOAS,
+			RouteLeakSuspected: result.RoutingSecurity.RouteLeakSuspected,
+			OriginAgreement:    result.RoutingSecurity.OriginAgreement,
+		}
+	}
+	if result.DataQuality != nil {
+		input.DataQualityScore = result.DataQuality.Score
+	}
+	return input
 }
 
 func (s *Service) enrichIP(ctx context.Context, ip string, allocation store.AllocationRecord, options LookupOptions) (enrich.Result, error) {
@@ -1485,7 +1546,7 @@ func inferredUsage(classification classify.Result, registration *enrich.Result, 
 	return classification.Scene, classification.SceneName, classification.Confidence, source
 }
 
-func (s *Service) lookupASN(ctx context.Context, snapshot *store.Snapshot, query string, asn int) Result {
+func (s *Service) lookupASN(ctx context.Context, snapshot *store.Snapshot, query string, asn int, options LookupOptions) Result {
 	profile, ok := snapshot.ASNs.Lookup(asn)
 	if !ok {
 		profile = store.ASNProfile{ASN: asn}
@@ -1517,23 +1578,26 @@ func (s *Service) lookupASN(ctx context.Context, snapshot *store.Snapshot, query
 		RuleEvidence:   evidence,
 	}, classification, &evidence)
 
-	return Result{
-		OK:         true,
-		Query:      query,
-		QueryType:  "asn",
-		ASN:        asn,
-		Company:    companyName(profile, asn),
-		Country:    profile.Country,
-		Registry:   profile.Registry,
-		Scene:      classification.Scene,
-		SceneName:  classification.SceneName,
-		Confidence: classification.Confidence,
-		Evidence:   evidence,
-		Sources:    profile.Sources,
-		Prefixes:   prefixes,
-		AI:         aiInfo,
-		DB:         snapshot.Status,
+	result := Result{
+		OK:            true,
+		Query:         query,
+		QueryType:     "asn",
+		ASN:           asn,
+		Company:       companyName(profile, asn),
+		Country:       profile.Country,
+		Registry:      profile.Registry,
+		Scene:         classification.Scene,
+		SceneName:     classification.SceneName,
+		ServicePolicy: classification.ServicePolicy,
+		Confidence:    classification.Confidence,
+		Evidence:      evidence,
+		Sources:       profile.Sources,
+		Prefixes:      prefixes,
+		AI:            aiInfo,
+		DB:            snapshot.Status,
 	}
+	s.attachQuality(&result, options)
+	return result
 }
 
 func (s *Service) maybeUseAI(ctx context.Context, input ai.AdviceInput, classification classify.Result, evidence *[]string) (classify.Result, *AIInfo) {

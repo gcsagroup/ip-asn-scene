@@ -31,6 +31,16 @@ enrichment:
 history:
   snapshots: 4
 
+quality:
+  enabled: true
+  include_default: false
+  ai_low_confidence: true
+  low_confidence_threshold: 0.6
+  allow_score: 80
+  review_score: 60
+  challenge_score: 40
+  rate_limit_score: 20
+
 bgp:
   enabled: true
   mode: "full"
@@ -64,6 +74,10 @@ dynamic_rules:
   uptimerobot_ip_url: "https://cdn.uptimerobot.com/api/IPv4andIPv6.txt"
   spamhaus_drop_v4_url: "https://www.spamhaus.org/drop/drop_v4.json"
   spamhaus_drop_v6_url: "https://www.spamhaus.org/drop/drop_v6.json"
+  firehol_level1_url: "https://iplists.firehol.org/files/firehol_level1.netset"
+  # firehol_anonymous 体积较大，默认留空；需要更强匿名代理覆盖时再启用。
+  firehol_anonymous_url: ""
+  az0_vpn_ip_url: "https://az0-vpnip-public.oooninja.com/ip.txt"
   cloudflare_v4_url: "https://www.cloudflare.com/ips-v4"
   cloudflare_v6_url: "https://www.cloudflare.com/ips-v6"
   fastly_url: "https://api.fastly.com/public-ip-list"
@@ -73,6 +87,10 @@ dynamic_rules:
   azure_service_tags_url: "https://www.microsoft.com/en-us/download/confirmation.aspx?id=56519"
   oracle_ip_ranges_url: "https://docs.oracle.com/en-us/iaas/tools/public_ip_ranges.json"
   github_meta_url: "https://api.github.com/meta"
+  apple_private_relay_url: "https://mask-api.icloud.com/egress-ip-ranges.csv"
+  google_fi_vpn_geofeed_url: "https://www.gstatic.com/fi/bridge/ipgeofeed.txt"
+  mullvad_relays_url: "https://api.mullvad.net/www/relays/all/"
+  nordvpn_servers_url: "https://api.nordvpn.com/v1/servers"
   mail_spf_domains:
     - "_spf.google.com"
     - "spf.protection.outlook.com"

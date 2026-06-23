@@ -17,14 +17,19 @@ type serviceRuleFile struct {
 }
 
 type ServiceRule struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Scene        string   `json:"scene"`
-	SceneName    string   `json:"scene_name"`
-	Confidence   float64  `json:"confidence"`
-	Prefixes     []string `json:"prefixes"`
-	RDNSContains []string `json:"rdns_contains"`
-	Evidence     string   `json:"evidence"`
+	ID                string   `json:"id"`
+	Name              string   `json:"name"`
+	Scene             string   `json:"scene"`
+	SceneName         string   `json:"scene_name"`
+	Confidence        float64  `json:"confidence"`
+	Prefixes          []string `json:"prefixes"`
+	RDNSContains      []string `json:"rdns_contains"`
+	Evidence          string   `json:"evidence"`
+	ServiceName       string   `json:"service_name,omitempty"`
+	ServiceSubtype    string   `json:"service_subtype,omitempty"`
+	RiskLevel         string   `json:"risk_level,omitempty"`
+	BlockRecommended  *bool    `json:"block_recommended,omitempty"`
+	NormalUserTraffic *bool    `json:"normal_user_traffic,omitempty"`
 
 	parsedPrefixes []netip.Prefix
 }
@@ -34,6 +39,7 @@ type serviceRulePrefixMatch struct {
 	Scene    string
 	Points   int
 	Evidence string
+	Policy   *ServicePolicy
 }
 
 type serviceRulePrefixIndex struct {
@@ -204,14 +210,14 @@ func cloneModTimes(values map[string]time.Time) map[string]time.Time {
 	return out
 }
 
-func applyServiceRules(input Input, add func(scene string, points int, evidence string)) {
+func applyServiceRules(input Input, add func(scene string, points int, evidence string, policy *ServicePolicy)) {
 	if !input.IP.IsValid() && strings.TrimSpace(input.RDNS) == "" {
 		return
 	}
 	seen := map[string]bool{}
 	for _, match := range currentPrefixMatches(input.IP) {
 		seen[match.RuleID] = true
-		add(match.Scene, match.Points, match.Evidence)
+		add(match.Scene, match.Points, match.Evidence, match.Policy)
 	}
 	rdns := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(input.RDNS), "."))
 	for _, rule := range currentServiceRules() {
@@ -221,7 +227,7 @@ func applyServiceRules(input Input, add func(scene string, points int, evidence 
 			if evidence == "" {
 				evidence = "命中离线服务规则：" + rule.Name
 			}
-			add(rule.Scene, points, evidence)
+			add(rule.Scene, points, evidence, servicePolicyFromRule(rule))
 		}
 	}
 }
@@ -246,17 +252,38 @@ func buildServiceRulePrefixIndex(rules []ServiceRule) serviceRulePrefixIndex {
 		if evidence == "" {
 			evidence = "命中离线服务规则：" + rule.Name
 		}
+		policy := servicePolicyFromRule(rule)
 		for _, prefix := range rule.parsedPrefixes {
 			match := serviceRulePrefixMatch{
 				RuleID:   rule.ID,
 				Scene:    rule.Scene,
 				Points:   points + prefix.Bits(),
 				Evidence: evidence,
+				Policy:   policy,
 			}
 			idx.add(prefix, match)
 		}
 	}
 	return idx
+}
+
+func servicePolicyFromRule(rule ServiceRule) *ServicePolicy {
+	if rule.ServiceName == "" && rule.ServiceSubtype == "" && rule.RiskLevel == "" && rule.BlockRecommended == nil && rule.NormalUserTraffic == nil {
+		return nil
+	}
+	serviceName := strings.TrimSpace(rule.ServiceName)
+	if serviceName == "" {
+		serviceName = strings.TrimSpace(rule.Name)
+	}
+	return &ServicePolicy{
+		RuleID:            rule.ID,
+		RuleName:          rule.Name,
+		ServiceName:       serviceName,
+		ServiceSubtype:    strings.TrimSpace(rule.ServiceSubtype),
+		RiskLevel:         strings.TrimSpace(rule.RiskLevel),
+		BlockRecommended:  rule.BlockRecommended,
+		NormalUserTraffic: rule.NormalUserTraffic,
+	}
 }
 
 func serviceRulePoints(confidence float64) int {

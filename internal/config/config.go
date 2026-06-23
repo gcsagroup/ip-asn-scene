@@ -24,6 +24,7 @@ type Config struct {
 	AI             AIConfig
 	Enrichment     EnrichmentConfig
 	History        HistoryConfig
+	Quality        QualityConfig
 	DynamicRules   DynamicRulesConfig
 	IP2Region      IP2RegionConfig
 	FirewallLists  FirewallListsConfig
@@ -61,6 +62,17 @@ type HistoryConfig struct {
 	Snapshots int
 }
 
+type QualityConfig struct {
+	Enabled                bool
+	IncludeDefault         bool
+	AILowConfidence        bool
+	LowConfidenceThreshold float64
+	AllowScore             int
+	ReviewScore            int
+	ChallengeScore         int
+	RateLimitScore         int
+}
+
 type BGPConfig struct {
 	Enabled              bool          `json:"enabled" yaml:"enabled"`
 	Mode                 string        `json:"mode" yaml:"mode"`
@@ -96,6 +108,9 @@ type DynamicRulesConfig struct {
 	UptimeRobotURL         string
 	SpamhausDropV4URL      string
 	SpamhausDropV6URL      string
+	FireHOLLevel1URL       string
+	FireHOLAnonymousURL    string
+	Az0VPNIPURL            string
 	CloudflareV4URL        string
 	CloudflareV6URL        string
 	FastlyURL              string
@@ -104,6 +119,10 @@ type DynamicRulesConfig struct {
 	AzureServiceTagsURL    string
 	OracleIPRangesURL      string
 	GitHubMetaURL          string
+	ApplePrivateRelayURL   string
+	GoogleFiVPNGeofeedURL  string
+	MullvadRelaysURL       string
+	NordVPNServersURL      string
 	MailSPFDomains         []string
 	IP2Proxy               IP2ProxyConfig
 }
@@ -171,6 +190,7 @@ type fileConfig struct {
 	AI                  fileAIConfig            `yaml:"ai"`
 	Enrichment          fileEnrichmentConfig    `yaml:"enrichment"`
 	History             fileHistoryConfig       `yaml:"history"`
+	Quality             fileQualityConfig       `yaml:"quality"`
 	DynamicRules        fileDynamicRulesConfig  `yaml:"dynamic_rules"`
 	IP2Region           fileIP2RegionConfig     `yaml:"ip2region"`
 	FirewallLists       fileFirewallListsConfig `yaml:"firewall_lists"`
@@ -209,6 +229,17 @@ type fileHistoryConfig struct {
 	Snapshots *int `yaml:"snapshots"`
 }
 
+type fileQualityConfig struct {
+	Enabled                *bool    `yaml:"enabled"`
+	IncludeDefault         *bool    `yaml:"include_default"`
+	AILowConfidence        *bool    `yaml:"ai_low_confidence"`
+	LowConfidenceThreshold *float64 `yaml:"low_confidence_threshold"`
+	AllowScore             *int     `yaml:"allow_score"`
+	ReviewScore            *int     `yaml:"review_score"`
+	ChallengeScore         *int     `yaml:"challenge_score"`
+	RateLimitScore         *int     `yaml:"rate_limit_score"`
+}
+
 type fileBGPConfig struct {
 	Enabled              *bool    `yaml:"enabled"`
 	Mode                 string   `yaml:"mode"`
@@ -244,6 +275,9 @@ type fileDynamicRulesConfig struct {
 	UptimeRobotURL         string             `yaml:"uptimerobot_ip_url"`
 	SpamhausDropV4URL      string             `yaml:"spamhaus_drop_v4_url"`
 	SpamhausDropV6URL      string             `yaml:"spamhaus_drop_v6_url"`
+	FireHOLLevel1URL       string             `yaml:"firehol_level1_url"`
+	FireHOLAnonymousURL    string             `yaml:"firehol_anonymous_url"`
+	Az0VPNIPURL            string             `yaml:"az0_vpn_ip_url"`
 	CloudflareV4URL        string             `yaml:"cloudflare_v4_url"`
 	CloudflareV6URL        string             `yaml:"cloudflare_v6_url"`
 	FastlyURL              string             `yaml:"fastly_url"`
@@ -252,6 +286,10 @@ type fileDynamicRulesConfig struct {
 	AzureServiceTagsURL    string             `yaml:"azure_service_tags_url"`
 	OracleIPRangesURL      string             `yaml:"oracle_ip_ranges_url"`
 	GitHubMetaURL          string             `yaml:"github_meta_url"`
+	ApplePrivateRelayURL   string             `yaml:"apple_private_relay_url"`
+	GoogleFiVPNGeofeedURL  string             `yaml:"google_fi_vpn_geofeed_url"`
+	MullvadRelaysURL       string             `yaml:"mullvad_relays_url"`
+	NordVPNServersURL      string             `yaml:"nordvpn_servers_url"`
 	MailSPFDomains         []string           `yaml:"mail_spf_domains"`
 	IP2Proxy               fileIP2ProxyConfig `yaml:"ip2proxy"`
 }
@@ -336,6 +374,16 @@ func Default() Config {
 		History: HistoryConfig{
 			Snapshots: 4,
 		},
+		Quality: QualityConfig{
+			Enabled:                true,
+			IncludeDefault:         false,
+			AILowConfidence:        true,
+			LowConfidenceThreshold: 0.6,
+			AllowScore:             80,
+			ReviewScore:            60,
+			ChallengeScore:         40,
+			RateLimitScore:         20,
+		},
 		BGP: BGPConfig{
 			Enabled:              true,
 			Mode:                 "full",
@@ -366,6 +414,8 @@ func Default() Config {
 			UptimeRobotURL:         "https://cdn.uptimerobot.com/api/IPv4andIPv6.txt",
 			SpamhausDropV4URL:      "https://www.spamhaus.org/drop/drop_v4.json",
 			SpamhausDropV6URL:      "https://www.spamhaus.org/drop/drop_v6.json",
+			FireHOLLevel1URL:       "https://iplists.firehol.org/files/firehol_level1.netset",
+			Az0VPNIPURL:            "https://az0-vpnip-public.oooninja.com/ip.txt",
 			CloudflareV4URL:        "https://www.cloudflare.com/ips-v4",
 			CloudflareV6URL:        "https://www.cloudflare.com/ips-v6",
 			FastlyURL:              "https://api.fastly.com/public-ip-list",
@@ -374,6 +424,10 @@ func Default() Config {
 			AzureServiceTagsURL:    "https://www.microsoft.com/en-us/download/confirmation.aspx?id=56519",
 			OracleIPRangesURL:      "https://docs.oracle.com/en-us/iaas/tools/public_ip_ranges.json",
 			GitHubMetaURL:          "https://api.github.com/meta",
+			ApplePrivateRelayURL:   "https://mask-api.icloud.com/egress-ip-ranges.csv",
+			GoogleFiVPNGeofeedURL:  "https://www.gstatic.com/fi/bridge/ipgeofeed.txt",
+			MullvadRelaysURL:       "https://api.mullvad.net/www/relays/all/",
+			NordVPNServersURL:      "https://api.nordvpn.com/v1/servers",
 			MailSPFDomains: []string{
 				"_spf.google.com",
 				"spf.protection.outlook.com",
@@ -508,6 +562,16 @@ func SaveToFile(path string, cfg Config) error {
 		History: fileHistoryConfig{
 			Snapshots: intPtr(cfg.History.Snapshots),
 		},
+		Quality: fileQualityConfig{
+			Enabled:                boolPtr(cfg.Quality.Enabled),
+			IncludeDefault:         boolPtr(cfg.Quality.IncludeDefault),
+			AILowConfidence:        boolPtr(cfg.Quality.AILowConfidence),
+			LowConfidenceThreshold: floatPtr(cfg.Quality.LowConfidenceThreshold),
+			AllowScore:             intPtr(cfg.Quality.AllowScore),
+			ReviewScore:            intPtr(cfg.Quality.ReviewScore),
+			ChallengeScore:         intPtr(cfg.Quality.ChallengeScore),
+			RateLimitScore:         intPtr(cfg.Quality.RateLimitScore),
+		},
 		BGP: fileBGPConfig{
 			Enabled:              boolPtr(cfg.BGP.Enabled),
 			Mode:                 cfg.BGP.Mode,
@@ -541,6 +605,9 @@ func SaveToFile(path string, cfg Config) error {
 			UptimeRobotURL:         cfg.DynamicRules.UptimeRobotURL,
 			SpamhausDropV4URL:      cfg.DynamicRules.SpamhausDropV4URL,
 			SpamhausDropV6URL:      cfg.DynamicRules.SpamhausDropV6URL,
+			FireHOLLevel1URL:       cfg.DynamicRules.FireHOLLevel1URL,
+			FireHOLAnonymousURL:    cfg.DynamicRules.FireHOLAnonymousURL,
+			Az0VPNIPURL:            cfg.DynamicRules.Az0VPNIPURL,
 			CloudflareV4URL:        cfg.DynamicRules.CloudflareV4URL,
 			CloudflareV6URL:        cfg.DynamicRules.CloudflareV6URL,
 			FastlyURL:              cfg.DynamicRules.FastlyURL,
@@ -549,6 +616,10 @@ func SaveToFile(path string, cfg Config) error {
 			AzureServiceTagsURL:    cfg.DynamicRules.AzureServiceTagsURL,
 			OracleIPRangesURL:      cfg.DynamicRules.OracleIPRangesURL,
 			GitHubMetaURL:          cfg.DynamicRules.GitHubMetaURL,
+			ApplePrivateRelayURL:   cfg.DynamicRules.ApplePrivateRelayURL,
+			GoogleFiVPNGeofeedURL:  cfg.DynamicRules.GoogleFiVPNGeofeedURL,
+			MullvadRelaysURL:       cfg.DynamicRules.MullvadRelaysURL,
+			NordVPNServersURL:      cfg.DynamicRules.NordVPNServersURL,
 			MailSPFDomains:         cfg.DynamicRules.MailSPFDomains,
 			IP2Proxy: fileIP2ProxyConfig{
 				Enabled:      boolPtr(cfg.DynamicRules.IP2Proxy.Enabled),
@@ -657,6 +728,7 @@ func applyConfigFile(cfg *Config, path string) error {
 	if file.History.Snapshots != nil && *file.History.Snapshots >= 0 {
 		cfg.History.Snapshots = *file.History.Snapshots
 	}
+	applyQualityFileConfig(&cfg.Quality, file.Quality)
 	applyBGPFileConfig(&cfg.BGP, file.BGP)
 	applyAdminFileConfig(&cfg.Admin, file.Admin)
 	applyDynamicRulesFileConfig(&cfg.DynamicRules, file.DynamicRules)
@@ -664,6 +736,33 @@ func applyConfigFile(cfg *Config, path string) error {
 	applyFirewallListsFileConfig(&cfg.FirewallLists, file.FirewallLists)
 	applySourcesFileConfig(&cfg.Sources, file.Sources)
 	return nil
+}
+
+func applyQualityFileConfig(cfg *QualityConfig, file fileQualityConfig) {
+	if file.Enabled != nil {
+		cfg.Enabled = *file.Enabled
+	}
+	if file.IncludeDefault != nil {
+		cfg.IncludeDefault = *file.IncludeDefault
+	}
+	if file.AILowConfidence != nil {
+		cfg.AILowConfidence = *file.AILowConfidence
+	}
+	if file.LowConfidenceThreshold != nil && *file.LowConfidenceThreshold > 0 && *file.LowConfidenceThreshold <= 1 {
+		cfg.LowConfidenceThreshold = *file.LowConfidenceThreshold
+	}
+	if file.AllowScore != nil && *file.AllowScore > 0 && *file.AllowScore <= 100 {
+		cfg.AllowScore = *file.AllowScore
+	}
+	if file.ReviewScore != nil && *file.ReviewScore > 0 && *file.ReviewScore <= 100 {
+		cfg.ReviewScore = *file.ReviewScore
+	}
+	if file.ChallengeScore != nil && *file.ChallengeScore > 0 && *file.ChallengeScore <= 100 {
+		cfg.ChallengeScore = *file.ChallengeScore
+	}
+	if file.RateLimitScore != nil && *file.RateLimitScore > 0 && *file.RateLimitScore <= 100 {
+		cfg.RateLimitScore = *file.RateLimitScore
+	}
 }
 
 func applyBGPFileConfig(cfg *BGPConfig, file fileBGPConfig) {
@@ -807,6 +906,15 @@ func applyDynamicRulesFileConfig(cfg *DynamicRulesConfig, file fileDynamicRulesC
 	if file.SpamhausDropV6URL != "" {
 		cfg.SpamhausDropV6URL = file.SpamhausDropV6URL
 	}
+	if file.FireHOLLevel1URL != "" {
+		cfg.FireHOLLevel1URL = file.FireHOLLevel1URL
+	}
+	if file.FireHOLAnonymousURL != "" {
+		cfg.FireHOLAnonymousURL = file.FireHOLAnonymousURL
+	}
+	if file.Az0VPNIPURL != "" {
+		cfg.Az0VPNIPURL = file.Az0VPNIPURL
+	}
 	if file.CloudflareV4URL != "" {
 		cfg.CloudflareV4URL = file.CloudflareV4URL
 	}
@@ -830,6 +938,18 @@ func applyDynamicRulesFileConfig(cfg *DynamicRulesConfig, file fileDynamicRulesC
 	}
 	if file.GitHubMetaURL != "" {
 		cfg.GitHubMetaURL = file.GitHubMetaURL
+	}
+	if file.ApplePrivateRelayURL != "" {
+		cfg.ApplePrivateRelayURL = file.ApplePrivateRelayURL
+	}
+	if file.GoogleFiVPNGeofeedURL != "" {
+		cfg.GoogleFiVPNGeofeedURL = file.GoogleFiVPNGeofeedURL
+	}
+	if file.MullvadRelaysURL != "" {
+		cfg.MullvadRelaysURL = file.MullvadRelaysURL
+	}
+	if file.NordVPNServersURL != "" {
+		cfg.NordVPNServersURL = file.NordVPNServersURL
 	}
 	if len(file.MailSPFDomains) > 0 {
 		cfg.MailSPFDomains = file.MailSPFDomains
@@ -1071,6 +1191,40 @@ func applyEnv(cfg *Config) {
 			cfg.History.Snapshots = parsed
 		}
 	}
+	if value := os.Getenv("QUALITY_ENABLED"); value != "" {
+		cfg.Quality.Enabled = parseEnvBool(value)
+	}
+	if value := os.Getenv("QUALITY_INCLUDE_DEFAULT"); value != "" {
+		cfg.Quality.IncludeDefault = parseEnvBool(value)
+	}
+	if value := os.Getenv("QUALITY_AI_LOW_CONFIDENCE"); value != "" {
+		cfg.Quality.AILowConfidence = parseEnvBool(value)
+	}
+	if value := os.Getenv("QUALITY_LOW_CONFIDENCE_THRESHOLD"); value != "" {
+		if parsed, err := strconv.ParseFloat(value, 64); err == nil && parsed > 0 && parsed <= 1 {
+			cfg.Quality.LowConfidenceThreshold = parsed
+		}
+	}
+	if value := os.Getenv("QUALITY_ALLOW_SCORE"); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 && parsed <= 100 {
+			cfg.Quality.AllowScore = parsed
+		}
+	}
+	if value := os.Getenv("QUALITY_REVIEW_SCORE"); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 && parsed <= 100 {
+			cfg.Quality.ReviewScore = parsed
+		}
+	}
+	if value := os.Getenv("QUALITY_CHALLENGE_SCORE"); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 && parsed <= 100 {
+			cfg.Quality.ChallengeScore = parsed
+		}
+	}
+	if value := os.Getenv("QUALITY_RATE_LIMIT_SCORE"); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 && parsed <= 100 {
+			cfg.Quality.RateLimitScore = parsed
+		}
+	}
 	if value := os.Getenv("BGP_ENABLED"); value != "" {
 		cfg.BGP.Enabled = parseEnvBool(value)
 	}
@@ -1164,6 +1318,27 @@ func applyEnv(cfg *Config) {
 	}
 	if value := os.Getenv("SPAMHAUS_DROP_V6_URL"); value != "" {
 		cfg.DynamicRules.SpamhausDropV6URL = value
+	}
+	if value := os.Getenv("FIREHOL_LEVEL1_URL"); value != "" {
+		cfg.DynamicRules.FireHOLLevel1URL = value
+	}
+	if value := os.Getenv("FIREHOL_ANONYMOUS_URL"); value != "" {
+		cfg.DynamicRules.FireHOLAnonymousURL = value
+	}
+	if value := os.Getenv("AZ0_VPN_IP_URL"); value != "" {
+		cfg.DynamicRules.Az0VPNIPURL = value
+	}
+	if value := os.Getenv("APPLE_PRIVATE_RELAY_URL"); value != "" {
+		cfg.DynamicRules.ApplePrivateRelayURL = value
+	}
+	if value := os.Getenv("GOOGLE_FI_VPN_GEOFEED_URL"); value != "" {
+		cfg.DynamicRules.GoogleFiVPNGeofeedURL = value
+	}
+	if value := os.Getenv("MULLVAD_RELAYS_URL"); value != "" {
+		cfg.DynamicRules.MullvadRelaysURL = value
+	}
+	if value := os.Getenv("NORDVPN_SERVERS_URL"); value != "" {
+		cfg.DynamicRules.NordVPNServersURL = value
 	}
 	if value := os.Getenv("MAIL_SPF_DOMAINS"); value != "" {
 		cfg.DynamicRules.MailSPFDomains = splitList(value)
