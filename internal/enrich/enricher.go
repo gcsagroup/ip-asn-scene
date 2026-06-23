@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"ipasn/internal/perf"
 	"ipasn/internal/store"
 )
 
@@ -328,14 +329,18 @@ func (c *Client) enrichOnline(ctx context.Context, ip string, allocation store.A
 	}, 1)
 
 	go func() {
+		start := time.Now()
 		value, ok := c.lookupCymru(ctx, ip)
+		recordThirdParty(ctx, "team_cymru", "tcp://whois.cymru.com:43", start, ok)
 		cymruCh <- struct {
 			value CymruResult
 			ok    bool
 		}{value: value, ok: ok}
 	}()
 	go func() {
+		start := time.Now()
 		value, ok := c.lookupRIPEStat(ctx, ip)
+		recordThirdParty(ctx, "ripestat_prefix", c.ripeStatPrefixURL(ip), start, ok)
 		ripeCh <- struct {
 			value RIPEStat
 			ok    bool
@@ -349,7 +354,9 @@ func (c *Client) enrichOnline(ctx context.Context, ip string, allocation store.A
 			}{}
 			return
 		}
+		start := time.Now()
 		value, ok := c.lookupRDAP(ctx, ip, allocation.Registry)
+		recordThirdParty(ctx, "rdap", c.rdapURL(ip, allocation.Registry), start, ok)
 		rdapCh <- struct {
 			value RDAPSummary
 			ok    bool
@@ -363,7 +370,9 @@ func (c *Client) enrichOnline(ctx context.Context, ip string, allocation store.A
 			}{}
 			return
 		}
+		start := time.Now()
 		value, ok := c.lookupWhois(ctx, ip, allocation.Registry)
+		recordThirdParty(ctx, "whois", whoisURL(allocation.Registry), start, ok)
 		whoisCh <- struct {
 			value WhoisSummary
 			ok    bool
@@ -373,7 +382,9 @@ func (c *Client) enrichOnline(ctx context.Context, ip string, allocation store.A
 	ripe := <-ripeCh
 	if ripe.ok && ripe.value.Prefix != "" {
 		go func(prefix string) {
+			start := time.Now()
 			value, ok := c.lookupBGPPath(ctx, prefix)
+			recordThirdParty(ctx, "ripe_ris_looking_glass", c.ripeStatBGPPathURL(prefix), start, ok)
 			bgpCh <- struct {
 				value BGPPathAnalysis
 				ok    bool
@@ -560,7 +571,7 @@ func (c *Client) lookupCymru(ctx context.Context, ip string) (CymruResult, bool)
 }
 
 func (c *Client) lookupRIPEStat(ctx context.Context, ip string) (RIPEStat, bool) {
-	prefixURL := strings.ReplaceAll(c.cfg.RIPEStatPrefixURL, "{ip}", ip)
+	prefixURL := c.ripeStatPrefixURL(ip)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, prefixURL, nil)
 	if err != nil {
 		return RIPEStat{}, false
@@ -604,8 +615,7 @@ func (c *Client) lookupBGPPath(ctx context.Context, prefix string) (BGPPathAnaly
 	if prefix == "" {
 		return BGPPathAnalysis{}, false
 	}
-	url := strings.ReplaceAll(c.cfg.RIPEStatBGPPathURL, "{prefix}", prefix)
-	url = strings.ReplaceAll(url, "{ip}", prefix)
+	url := c.ripeStatBGPPathURL(prefix)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return BGPPathAnalysis{}, false
@@ -620,6 +630,15 @@ func (c *Client) lookupBGPPath(ctx context.Context, prefix string) (BGPPathAnaly
 		return BGPPathAnalysis{}, false
 	}
 	return ParseRIPEStatLookingGlass(body)
+}
+
+func (c *Client) ripeStatPrefixURL(ip string) string {
+	return strings.ReplaceAll(c.cfg.RIPEStatPrefixURL, "{ip}", ip)
+}
+
+func (c *Client) ripeStatBGPPathURL(prefix string) string {
+	url := strings.ReplaceAll(c.cfg.RIPEStatBGPPathURL, "{prefix}", prefix)
+	return strings.ReplaceAll(url, "{ip}", prefix)
 }
 
 func ParseRIPEStatLookingGlass(body []byte) (BGPPathAnalysis, bool) {
@@ -746,6 +765,15 @@ func (c *Client) lookupWhois(ctx context.Context, ip, registry string) (WhoisSum
 	return summary, summary.NetName != "" || len(summary.Descriptions) > 0 || len(summary.Remarks) > 0
 }
 
+func recordThirdParty(ctx context.Context, name, url string, start time.Time, ok bool) {
+	perf.RecordThirdParty(ctx, perf.ThirdPartyCall{
+		Name:       name,
+		URL:        url,
+		DurationMS: perf.DurationMS(time.Since(start)),
+		OK:         ok,
+	})
+}
+
 func defaultCymruLookup(ctx context.Context, ip string) ([]string, error) {
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "tcp", "whois.cymru.com:43")
@@ -770,14 +798,7 @@ func defaultCymruLookup(ctx context.Context, ip string) ([]string, error) {
 }
 
 func defaultWhoisLookup(ctx context.Context, registry, ip string) (string, error) {
-	host := map[string]string{
-		"apnic":   "whois.apnic.net:43",
-		"arin":    "whois.arin.net:43",
-		"ripencc": "whois.ripe.net:43",
-		"ripe":    "whois.ripe.net:43",
-		"lacnic":  "whois.lacnic.net:43",
-		"afrinic": "whois.afrinic.net:43",
-	}[strings.ToLower(registry)]
+	host := whoisHost(registry)
 	if host == "" {
 		return "", fmt.Errorf("unknown whois registry %q", registry)
 	}
@@ -796,6 +817,25 @@ func defaultWhoisLookup(ctx context.Context, registry, ip string) (string, error
 		return "", err
 	}
 	return string(body), nil
+}
+
+func whoisURL(registry string) string {
+	host := whoisHost(registry)
+	if host == "" {
+		return "tcp://whois/" + strings.ToLower(strings.TrimSpace(registry))
+	}
+	return "tcp://" + host
+}
+
+func whoisHost(registry string) string {
+	return map[string]string{
+		"apnic":   "whois.apnic.net:43",
+		"arin":    "whois.arin.net:43",
+		"ripencc": "whois.ripe.net:43",
+		"ripe":    "whois.ripe.net:43",
+		"lacnic":  "whois.lacnic.net:43",
+		"afrinic": "whois.afrinic.net:43",
+	}[strings.ToLower(strings.TrimSpace(registry))]
 }
 
 func (c *Client) cachePath(ip, prefix string) string {

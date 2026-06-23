@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 type staticLocator struct {
@@ -85,5 +86,33 @@ func TestGeofeedLocatorIgnoresUnsupportedMappedPrefix(t *testing.T) {
 		if _, ok := locator.Lookup(context.Background(), "203.0.113.10"); ok {
 			t.Fatal("mapped IPv6 prefix should not be indexed as IPv4 with an invalid mask")
 		}
+	}
+}
+
+func TestGeofeedLocatorReloadsChangedFiles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "geofeed.csv")
+	if err := os.WriteFile(path, []byte("203.0.113.0/24,US,US-CA,Los Angeles,\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	locator, err := NewGeofeedLocatorFromFiles(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	location, ok := locator.Lookup(context.Background(), "203.0.113.10")
+	if !ok || location.City != "Los Angeles" {
+		t.Fatalf("expected initial geofeed location, got %#v ok=%v", location, ok)
+	}
+
+	if err := os.WriteFile(path, []byte("203.0.113.0/24,US,US-NY,New York,\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, time.Now().Add(time.Second), time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	locator.lastCheck.Store(time.Now().Add(-geofeedReloadCheckInterval).UnixNano())
+
+	location, ok = locator.Lookup(context.Background(), "203.0.113.10")
+	if !ok || location.City != "New York" {
+		t.Fatalf("expected reloaded geofeed location, got %#v ok=%v", location, ok)
 	}
 }

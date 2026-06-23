@@ -14,6 +14,7 @@ import (
 	"ipasn/internal/classify"
 	"ipasn/internal/enrich"
 	"ipasn/internal/geo"
+	"ipasn/internal/perf"
 	"ipasn/internal/store"
 )
 
@@ -147,6 +148,39 @@ func TestServiceIncludesLocationOnlyWhenRequested(t *testing.T) {
 	}
 	if !containsEvidence(withLocation.Evidence, "IP 所在地：美国 加利福尼亚 山景城 Google") {
 		t.Fatalf("expected location evidence, got %#v", withLocation.Evidence)
+	}
+}
+
+func TestServiceIncludesPerformanceOnlyWhenRequested(t *testing.T) {
+	prefixes := store.NewPrefixIndex()
+	if err := prefixes.Add("8.8.8.0/24", 15169, "test"); err != nil {
+		t.Fatal(err)
+	}
+	asns := store.NewASNIndex()
+	asns.Upsert(store.ASNProfile{ASN: 15169, Name: "Google LLC"})
+	svc := NewServiceWithOptions(store.NewSnapshot(prefixes, asns, store.Status{Version: "test"}), Options{
+		Enricher: fakeEnricher{result: enrich.Result{CacheHit: true, Organization: "Google LLC"}},
+	})
+
+	ordinary := svc.LookupWithOptions(context.Background(), "8.8.8.8", LookupOptions{OnlineEnrichment: OnlineEnrichmentWait})
+	if ordinary.Performance != nil {
+		t.Fatalf("expected performance to be omitted by default: %#v", ordinary.Performance)
+	}
+
+	ctx := perf.WithRecorder(context.Background(), perf.NewRecorder())
+	withPerformance := svc.LookupWithOptions(ctx, "8.8.8.8", LookupOptions{
+		OnlineEnrichment:      OnlineEnrichmentWait,
+		IncludePerformance:    true,
+		PerformanceThirdParty: true,
+	})
+	if withPerformance.Performance == nil {
+		t.Fatalf("expected performance report")
+	}
+	if withPerformance.Performance.TotalMS < 0 || withPerformance.Performance.LocalOfflineMS < 0 {
+		t.Fatalf("unexpected performance report: %#v", withPerformance.Performance)
+	}
+	if !withPerformance.Performance.CacheHit {
+		t.Fatalf("expected online cache flag copied from enrichment result: %#v", withPerformance.Performance)
 	}
 }
 
@@ -1313,6 +1347,32 @@ func TestServiceUsesAIOnlyForLowConfidenceResult(t *testing.T) {
 	}
 	if result.Scene != "ORG" || result.AI == nil || !result.AI.Used {
 		t.Fatalf("expected AI scene result, got %#v", result)
+	}
+}
+
+func TestServiceCanReplaceAIAdvisorAtRuntime(t *testing.T) {
+	prefixes := store.NewPrefixIndex()
+	if err := prefixes.Add("203.0.115.0/24", 64500, "test"); err != nil {
+		t.Fatal(err)
+	}
+	asns := store.NewASNIndex()
+	asns.Upsert(store.ASNProfile{ASN: 64500, Name: "Example Holder"})
+	firstAdvisor := &fakeAdvisor{decision: ai.Decision{Scene: "ORG", SceneName: "组织机构", Confidence: 0.82, Reason: "first advisor"}}
+	secondAdvisor := &fakeAdvisor{decision: ai.Decision{Scene: "IDC", SceneName: "数据中心", Confidence: 0.83, Reason: "second advisor"}}
+	svc := NewServiceWithOptions(store.NewSnapshot(prefixes, asns, store.Status{Version: "test"}), Options{
+		AIAdvisor:          firstAdvisor,
+		AIConfidenceCutoff: 0.7,
+	})
+
+	first := svc.Lookup("203.0.115.10")
+	if first.Scene != "ORG" || firstAdvisor.calls != 1 {
+		t.Fatalf("expected first advisor result, got scene=%s calls=%d", first.Scene, firstAdvisor.calls)
+	}
+
+	svc.SetAIAdvisor(secondAdvisor, 0.7)
+	second := svc.Lookup("203.0.115.10")
+	if second.Scene != "IDC" || secondAdvisor.calls != 1 {
+		t.Fatalf("expected replacement advisor result, got scene=%s calls=%d", second.Scene, secondAdvisor.calls)
 	}
 }
 

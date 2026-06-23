@@ -2,13 +2,22 @@ package httpapi
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path"
+	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"ipasn/internal/ai"
 	"ipasn/internal/config"
 	"ipasn/internal/lookup"
 	"ipasn/internal/store"
@@ -24,12 +33,17 @@ type ConfigStore interface {
 	UpdateConfig(config.Config) error
 }
 
+type RuntimeConfigApplier interface {
+	ApplyRuntimeConfig(config.Config) error
+}
+
 type ServerOptions struct {
 	Lookup                 *lookup.Service
 	Manager                Manager
 	IncludeLocationDefault bool
 	Config                 config.Config
 	ConfigStore            ConfigStore
+	RuntimeConfigApplier   RuntimeConfigApplier
 }
 
 type Server struct {
@@ -39,6 +53,15 @@ type Server struct {
 	includeLocationDefault bool
 	cfg                    config.Config
 	configStore            ConfigStore
+	runtimeConfigApplier   RuntimeConfigApplier
+	modelCacheMu           sync.Mutex
+	modelCache             map[string]cachedAIModels
+}
+
+type cachedAIModels struct {
+	provider  string
+	models    []ai.ModelInfo
+	expiresAt time.Time
 }
 
 func New(options ServerOptions) *Server {
@@ -52,6 +75,8 @@ func New(options ServerOptions) *Server {
 		includeLocationDefault: options.IncludeLocationDefault,
 		cfg:                    options.Config,
 		configStore:            options.ConfigStore,
+		runtimeConfigApplier:   options.RuntimeConfigApplier,
+		modelCache:             map[string]cachedAIModels{},
 	}
 	server.routes()
 	return server
@@ -65,6 +90,7 @@ func (s *Server) routes() {
 	if s.cfg.Admin.Enabled {
 		s.mux.HandleFunc(s.cfg.Admin.Path, s.adminPage)
 		s.mux.HandleFunc("/api/admin/config", s.adminConfigHandler)
+		s.mux.HandleFunc("/api/admin/ai/models", s.adminAIModelsHandler)
 		s.mux.HandleFunc("/api/admin/status", s.adminStatusHandler)
 		s.mux.HandleFunc("/api/admin/update", s.adminUpdateHandler)
 	}
@@ -115,20 +141,204 @@ func (s *Server) adminConfigHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		runtimeApplied := false
+		if s.runtimeConfigApplier != nil {
+			if err := s.runtimeConfigApplier.ApplyRuntimeConfig(updated); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+				return
+			}
+			runtimeApplied = true
+		}
 		s.cfg = updated
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restart_required": true, "config": publicConfig(updated)})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restart_required": true, "runtime_applied": runtimeApplied, "config": publicConfig(updated)})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+type adminAIModelsRequest struct {
+	Provider string `json:"provider"`
+	APIKey   string `json:"api_key"`
+	BaseURL  string `json:"base_url"`
+	Version  string `json:"version"`
+}
+
+func (s *Server) adminAIModelsHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeAdmin(w, r, true) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var request adminAIModelsRequest
+	body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &request); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+	}
+	listConfig, err := s.modelListConfig(request)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	currentModel := configuredAIModel(s.currentConfig().AI, listConfig.Provider)
+	cacheKey := modelCacheKey(listConfig)
+	if cached, ok := s.getCachedAIModels(cacheKey); ok {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":       true,
+			"provider": listConfig.Provider,
+			"source":   "cache",
+			"models":   ai.MergeModelOptions(listConfig.Provider, currentModel, cached.models),
+		})
+		return
+	}
+	models, err := ai.ListModels(r.Context(), listConfig)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":       true,
+			"provider": listConfig.Provider,
+			"source":   "fallback",
+			"error":    sanitizeAIModelError(err),
+			"models":   ai.MergeModelOptions(listConfig.Provider, currentModel, nil),
+		})
+		return
+	}
+	s.setCachedAIModels(cacheKey, listConfig.Provider, models)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":       true,
+		"provider": listConfig.Provider,
+		"source":   "online",
+		"models":   ai.MergeModelOptions(listConfig.Provider, currentModel, models),
+	})
+}
+
+func (s *Server) modelListConfig(request adminAIModelsRequest) (ai.ModelListConfig, error) {
+	cfg := s.currentConfig()
+	provider := strings.ToLower(strings.TrimSpace(request.Provider))
+	if provider == "" || provider == "auto" {
+		provider = firstConfiguredAIProvider(cfg.AI)
+	}
+	listConfig := ai.ModelListConfig{
+		Provider: provider,
+		Timeout:  cfg.AI.Timeout,
+	}
+	switch provider {
+	case "openai":
+		listConfig.APIKey = firstNonEmptyString(request.APIKey, cfg.AI.OpenAIAPIKey)
+		listConfig.BaseURL = firstNonEmptyString(request.BaseURL, cfg.AI.OpenAIBaseURL)
+	case "anthropic":
+		listConfig.APIKey = firstNonEmptyString(request.APIKey, cfg.AI.AnthropicAPIKey)
+		listConfig.BaseURL = firstNonEmptyString(request.BaseURL, cfg.AI.AnthropicBaseURL)
+		listConfig.Version = firstNonEmptyString(request.Version, cfg.AI.AnthropicVersion)
+	case "gemini":
+		listConfig.APIKey = firstNonEmptyString(request.APIKey, cfg.AI.GeminiAPIKey)
+		listConfig.BaseURL = firstNonEmptyString(request.BaseURL, cfg.AI.GeminiBaseURL)
+	default:
+		return ai.ModelListConfig{}, fmt.Errorf("unsupported AI provider %q", provider)
+	}
+	return listConfig, nil
+}
+
+func firstConfiguredAIProvider(cfg config.AIConfig) string {
+	if strings.TrimSpace(cfg.OpenAIAPIKey) != "" {
+		return "openai"
+	}
+	if strings.TrimSpace(cfg.AnthropicAPIKey) != "" {
+		return "anthropic"
+	}
+	if strings.TrimSpace(cfg.GeminiAPIKey) != "" {
+		return "gemini"
+	}
+	return strings.ToLower(strings.TrimSpace(cfg.Provider))
+}
+
+func configuredAIModel(cfg config.AIConfig, provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "openai":
+		return cfg.OpenAIModel
+	case "anthropic":
+		return cfg.AnthropicModel
+	case "gemini":
+		return cfg.GeminiModel
+	default:
+		return ""
+	}
+}
+
+func sanitizeAIModelError(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "api key") || strings.Contains(message, "unauthorized") || strings.Contains(message, "forbidden") || strings.Contains(message, "401") || strings.Contains(message, "403") {
+		return "AI provider authentication failed; please check API key and provider settings"
+	}
+	if strings.Contains(message, "timeout") || strings.Contains(message, "deadline") {
+		return "AI provider model list request timed out"
+	}
+	return "AI provider model list request failed"
+}
+
+func modelCacheKey(cfg ai.ModelListConfig) string {
+	return strings.Join([]string{
+		strings.ToLower(strings.TrimSpace(cfg.Provider)),
+		strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/"),
+		strings.TrimSpace(cfg.Version),
+	}, "\x00")
+}
+
+func (s *Server) getCachedAIModels(key string) (cachedAIModels, bool) {
+	s.modelCacheMu.Lock()
+	defer s.modelCacheMu.Unlock()
+	cached, ok := s.modelCache[key]
+	if !ok || time.Now().After(cached.expiresAt) {
+		if ok {
+			delete(s.modelCache, key)
+		}
+		return cachedAIModels{}, false
+	}
+	return cached, true
+}
+
+func (s *Server) setCachedAIModels(key, provider string, models []ai.ModelInfo) {
+	s.modelCacheMu.Lock()
+	defer s.modelCacheMu.Unlock()
+	copied := append([]ai.ModelInfo(nil), models...)
+	s.modelCache[key] = cachedAIModels{
+		provider:  provider,
+		models:    copied,
+		expiresAt: time.Now().Add(10 * time.Minute),
+	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (s *Server) adminStatusHandler(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeAdmin(w, r, true) {
 		return
 	}
-	status := map[string]any{"ok": true, "config": publicConfig(s.currentConfig())}
+	cfg := s.currentConfig()
+	status := map[string]any{"ok": true, "config": publicConfig(cfg)}
 	if s.manager != nil {
-		status["database"] = s.manager.Status()
+		database := s.manager.Status()
+		status["database"] = database
+		status["offline_libraries"] = offlineLibraries(cfg, database)
+	} else {
+		status["offline_libraries"] = offlineLibraries(cfg, store.Status{DataDir: cfg.DataDir})
 	}
 	writeJSON(w, http.StatusOK, status)
 }
@@ -184,8 +394,17 @@ func isLocalRequest(r *http.Request) bool {
 }
 
 func publicConfig(cfg config.Config) map[string]any {
+	value := publicConfigBase(cfg)
+	value["defaults"] = publicConfigDefaults()
+	value["help"] = configHelp()
+	return value
+}
+
+func publicConfigBase(cfg config.Config) map[string]any {
 	cfg.Admin.Token = ""
 	cfg.AI.OpenAIAPIKey = ""
+	cfg.AI.AnthropicAPIKey = ""
+	cfg.AI.GeminiAPIKey = ""
 	cfg.DynamicRules.IP2Proxy.Token = ""
 	return map[string]any{
 		"addr":                  cfg.Addr,
@@ -199,11 +418,77 @@ func publicConfig(cfg config.Config) map[string]any {
 		"enrichment":            publicEnrichmentConfig(cfg.Enrichment),
 		"history":               map[string]any{"snapshots": cfg.History.Snapshots},
 		"quality":               publicQualityConfig(cfg.Quality),
+		"performance":           publicPerformanceConfig(cfg.Performance),
 		"dynamic_rules":         publicDynamicRulesConfig(cfg.DynamicRules),
 		"ip2region":             publicIP2RegionConfig(cfg.IP2Region),
 		"bgp":                   publicBGPConfig(cfg.BGP),
 		"admin":                 cfg.Admin,
 		"sources":               publicSourcesConfig(cfg.Sources),
+	}
+}
+
+func publicConfigDefaults() map[string]any {
+	defaults := publicConfigBase(config.Default())
+	if dynamicRules, ok := defaults["dynamic_rules"].(map[string]any); ok {
+		dynamicRules["firehol_anonymous_url"] = "https://iplists.firehol.org/files/firehol_anonymous.netset"
+	}
+	return defaults
+}
+
+type configHelpItem struct {
+	Group   string `json:"group"`
+	Title   string `json:"title"`
+	Help    string `json:"help"`
+	Impact  string `json:"impact,omitempty"`
+	Default string `json:"default,omitempty"`
+}
+
+func configHelp() map[string]configHelpItem {
+	return map[string]configHelpItem{
+		"addr":                                    {Group: "基础配置", Title: "监听地址", Help: "服务监听地址，例如 :18080。修改后需要重启进程生效。", Impact: "影响 Web 页面和 API 访问入口。"},
+		"data_dir":                                {Group: "基础配置", Title: "数据目录", Help: "离线库、生成规则、BGP 汇总和缓存的主目录。", Impact: "目录越大，更新和备份成本越高。"},
+		"rules_file":                              {Group: "基础配置", Title: "服务规则文件", Help: "手工维护的 DNS、STUN、公共服务、风险网段等规则。", Impact: "明确 CIDR 规则优先级高于弱推断。"},
+		"asn_rules_file":                          {Group: "基础配置", Title: "ASN 场景规则", Help: "维护 ASN 级场景种子，适合教育网、政府、运营商、云厂商等粗粒度规则。"},
+		"update_interval_hours":                   {Group: "基础配置", Title: "自动更新间隔", Help: "后台自动刷新离线数据的周期，0 表示不自动更新。"},
+		"http_timeout_seconds":                    {Group: "基础配置", Title: "HTTP 超时", Help: "下载公开数据源、在线增强和规则更新时的单请求超时时间。"},
+		"admin.token":                             {Group: "后台与 SSL", Title: "后台 Token", Help: "配置后访问后台 API 需要 X-Admin-Token。页面会保存在浏览器 localStorage。", Impact: "生产环境建议配置。"},
+		"tls.enabled":                             {Group: "后台与 SSL", Title: "启用 HTTPS", Help: "启用后使用证书和私钥提供 HTTPS。修改后需要重启。"},
+		"ai.provider":                             {Group: "AI 与在线增强", Title: "AI Provider", Help: "auto 会按 OpenAI、Anthropic、Gemini 的顺序选择已配置 key；off 禁用 AI；也可以固定某个 provider。"},
+		"ai.openai_api_type":                      {Group: "AI 与在线增强", Title: "OpenAI 接口类型", Help: "responses 使用 /v1/responses；chat_completions 使用 /v1/chat/completions，适合很多 OpenAI 兼容服务。"},
+		"ai.anthropic_model":                      {Group: "AI 与在线增强", Title: "Anthropic 模型", Help: "Claude 模型 ID，可点击模型列表按钮从 Anthropic Models API 获取。"},
+		"ai.anthropic_base_url":                   {Group: "AI 与在线增强", Title: "Anthropic Base URL", Help: "默认 https://api.anthropic.com；代理服务可填写自定义地址。"},
+		"ai.anthropic_version":                    {Group: "AI 与在线增强", Title: "Anthropic API Version", Help: "Anthropic API 要求的版本请求头，默认 2023-06-01。"},
+		"ai.gemini_model":                         {Group: "AI 与在线增强", Title: "Gemini 模型", Help: "Gemini 模型 ID，可点击模型列表按钮从 Gemini Models API 获取。"},
+		"ai.gemini_base_url":                      {Group: "AI 与在线增强", Title: "Gemini Base URL", Help: "默认 https://generativelanguage.googleapis.com/v1beta；代理服务可填写自定义地址。"},
+		"ai.confidence_cutoff":                    {Group: "AI 与在线增强", Title: "AI 置信度阈值", Help: "低于该阈值时才考虑 AI 辅助，避免把高置信度离线规则交给模型覆盖。"},
+		"enrichment.enabled":                      {Group: "AI 与在线增强", Title: "在线增强", Help: "启用 Team Cymru、RIPEstat、RDAP、WHOIS、RIPE RIS 等当前校验。", Impact: "提高准确度，但首次未缓存查询会增加等待或后台刷新。"},
+		"enrichment.foreground_timeout_ms":        {Group: "AI 与在线增强", Title: "前台等待时间", Help: "fast 模式下缓存未命中时最多等待多久，超过后先返回离线结果并后台刷新。"},
+		"quality.enabled":                         {Group: "IP 质量评分", Title: "启用评分", Help: "根据场景、公开风险源、路由安全、服务策略、数据质量给出 IP 纯净度评分。"},
+		"quality.include_default":                 {Group: "IP 质量评分", Title: "默认输出评分", Help: "开启后 /api/lookup 默认返回 ip_quality；关闭时需要 include_quality=1 或调用 /api/quality。"},
+		"performance.enabled":                     {Group: "性能指标", Title: "启用性能指标", Help: "允许 /api/lookup 返回本次查询耗时、在线增强耗时和第三方源耗时。"},
+		"performance.include_default":             {Group: "性能指标", Title: "默认输出性能指标", Help: "开启后 /api/lookup 默认返回 performance；关闭时需要 include_performance=1。", Impact: "会让响应体变大，生产 API 一般建议按需开启。"},
+		"performance.third_party_default":         {Group: "性能指标", Title: "默认输出第三方耗时", Help: "输出 Team Cymru、RIPEstat、RDAP、WHOIS、RIPE RIS 等在线源的单独耗时。", Impact: "只记录当前请求实际等待的第三方调用；缓存命中不会产生第三方明细。"},
+		"ip2region.enabled":                       {Group: "IP 所在地库", Title: "启用 ip2region", Help: "启用后查询可返回国家、省市、运营商和库内 ASN。需要配置并下载 XDB 文件。"},
+		"ip2region.v4_version_url":                {Group: "IP 所在地库", Title: "IPv4 版本 API", Help: "ip2region 离线库版本检查接口，用于判断本地 XDB 是否需要更新。", Default: "商业授权地址由你提供，不能公开内置。"},
+		"ip2region.v4_download_url":               {Group: "IP 所在地库", Title: "IPv4 下载地址", Help: "ip2region IPv4 全载库下载地址。", Default: "商业授权地址由你提供，不能公开内置。"},
+		"ip2region.v6_version_url":                {Group: "IP 所在地库", Title: "IPv6 版本 API", Help: "ip2region IPv6 离线库版本检查接口。"},
+		"ip2region.v6_download_url":               {Group: "IP 所在地库", Title: "IPv6 下载地址", Help: "ip2region IPv6 全载库下载地址。"},
+		"bgp.enabled":                             {Group: "全量 BGP", Title: "启用全量 BGP", Help: "后台下载 RouteViews / RIPE RIS RIB 并生成本地多观察点 BGP 摘要。", Impact: "磁盘和更新时间开销较大，查询阶段只读本地摘要。"},
+		"bgp.collectors":                          {Group: "全量 BGP", Title: "Collectors", Help: "all 表示自动选择全部可用 collector；也可以填写指定 collector 名称。"},
+		"bgp.download_timeout_seconds":            {Group: "全量 BGP", Title: "RIB 下载超时", Help: "单个 RouteViews / RIPE RIS MRT RIB 大文件下载的超时时间。", Impact: "网络慢或 collector 多时建议调大；只影响 BGP 原始 RIB 下载，不影响普通查询超时。", Default: "7200"},
+		"sources.rpki_vrp_urls":                   {Group: "公开离线数据源", Title: "RPKI VRP URLs", Help: "ROA 授权数据，用于判断 RPKI valid/invalid/not_found。"},
+		"sources.irr_route_urls":                  {Group: "公开离线数据源", Title: "IRR Route URLs", Help: "IRR route/route6 对象，用于辅助判断 origin ASN 是否与注册路由对象一致。"},
+		"sources.bgp_observation_urls":            {Group: "公开离线数据源", Title: "BGP Observation URLs", Help: "外部预处理 BGP 摘要。全量 BGP 模式会本地生成，一般保持为空。"},
+		"sources.geofeed_urls":                    {Group: "公开离线数据源", Title: "Geofeed URLs", Help: "RFC 8805 geofeed，用于增强实际所在地，优先级高于 ip2region。"},
+		"dynamic_rules.enabled":                   {Group: "动态规则", Title: "启用动态规则", Help: "后台更新时自动拉取公开服务 IP 列表并生成 data/generated/services.json。"},
+		"dynamic_rules.firehol_level1_url":        {Group: "动态规则", Title: "FireHOL level1", Help: "低误报风险网段聚合，生成 BLOCKLIST 规则。"},
+		"dynamic_rules.firehol_anonymous_url":     {Group: "动态规则", Title: "FireHOL anonymous", Help: "匿名代理/Tor 聚合列表，生成 PROXY 规则。体积较大，默认不自动启用；可用“填充公开默认源”填入。", Impact: "可能扩大代理识别面，拦截策略应结合业务场景。", Default: "https://iplists.firehol.org/files/firehol_anonymous.netset"},
+		"dynamic_rules.az0_vpn_ip_url":            {Group: "动态规则", Title: "az0/vpn_ip", Help: "公开 VPN IP 列表，生成 VPN 规则。"},
+		"dynamic_rules.apple_private_relay_url":   {Group: "动态规则", Title: "Apple iCloud Private Relay", Help: "Apple 官方隐私代理出口 CSV。技术场景为 PROXY，但服务策略会标记为正常用户隐私流量。"},
+		"dynamic_rules.google_fi_vpn_geofeed_url": {Group: "动态规则", Title: "Google Fi VPN Geofeed", Help: "Google Fi VPN geofeed。技术场景为 VPN，但服务策略会标记为运营商隐私服务。"},
+		"dynamic_rules.ip2proxy.local_file":       {Group: "动态规则 / IP2Proxy", Title: "IP2Proxy 本地文件", Help: "本地 IP2Proxy CSV 或 ZIP 文件路径。适合商业库手工放置后离线加载。", Default: "没有通用默认路径。"},
+		"dynamic_rules.ip2proxy.download_url":     {Group: "动态规则 / IP2Proxy", Title: "IP2Proxy 下载地址", Help: "可填写商业库下载基址或完整下载地址；如果只配置 Token 和 Package，程序会使用 IP2Location 官方下载基址。", Default: "需要授权 Token，不自动公开内置。"},
+		"dynamic_rules.ip2proxy.token":            {Group: "动态规则 / IP2Proxy", Title: "IP2Proxy Token", Help: "商业授权 Token。后台不会回显，留空表示不修改。"},
 	}
 }
 
@@ -217,15 +502,21 @@ func publicTLSConfig(cfg config.TLSConfig) map[string]any {
 
 func publicAIConfig(cfg config.AIConfig) map[string]any {
 	return map[string]any{
-		"provider":          cfg.Provider,
-		"openai_api_key":    "",
-		"openai_model":      cfg.OpenAIModel,
-		"openai_base_url":   cfg.OpenAIBaseURL,
-		"ollama_model":      cfg.OllamaModel,
-		"ollama_base_url":   cfg.OllamaBaseURL,
-		"confidence_cutoff": cfg.ConfidenceCutoff,
-		"timeout_seconds":   int(cfg.Timeout / time.Second),
-		"max_cache":         cfg.MaxCache,
+		"provider":           cfg.Provider,
+		"openai_api_key":     "",
+		"openai_model":       cfg.OpenAIModel,
+		"openai_base_url":    cfg.OpenAIBaseURL,
+		"openai_api_type":    cfg.OpenAIAPIType,
+		"anthropic_api_key":  "",
+		"anthropic_model":    cfg.AnthropicModel,
+		"anthropic_base_url": cfg.AnthropicBaseURL,
+		"anthropic_version":  cfg.AnthropicVersion,
+		"gemini_api_key":     "",
+		"gemini_model":       cfg.GeminiModel,
+		"gemini_base_url":    cfg.GeminiBaseURL,
+		"confidence_cutoff":  cfg.ConfidenceCutoff,
+		"timeout_seconds":    int(cfg.Timeout / time.Second),
+		"max_cache":          cfg.MaxCache,
 	}
 }
 
@@ -249,6 +540,14 @@ func publicQualityConfig(cfg config.QualityConfig) map[string]any {
 		"review_score":             cfg.ReviewScore,
 		"challenge_score":          cfg.ChallengeScore,
 		"rate_limit_score":         cfg.RateLimitScore,
+	}
+}
+
+func publicPerformanceConfig(cfg config.PerformanceConfig) map[string]any {
+	return map[string]any{
+		"enabled":             cfg.Enabled,
+		"include_default":     cfg.IncludeDefault,
+		"third_party_default": cfg.ThirdPartyDefault,
 	}
 }
 
@@ -306,22 +605,25 @@ func publicIP2RegionConfig(cfg config.IP2RegionConfig) map[string]any {
 
 func publicBGPConfig(cfg config.BGPConfig) map[string]any {
 	return map[string]any{
-		"enabled":                cfg.Enabled,
-		"mode":                   cfg.Mode,
-		"routeviews_enabled":     cfg.RouteViewsEnabled,
-		"ripe_ris_enabled":       cfg.RIPERISEnabled,
-		"collectors":             cfg.Collectors,
-		"include_updates":        cfg.IncludeUpdates,
-		"history_snapshots":      cfg.HistorySnapshots,
-		"refresh_hours":          int(cfg.RefreshInterval / time.Hour),
-		"max_parallel_downloads": cfg.MaxParallelDownloads,
-		"max_parallel_parse":     cfg.MaxParallelParse,
-		"keep_raw":               cfg.KeepRaw,
-		"raw_retention_days":     cfg.RawRetentionDays,
-		"summary_file":           cfg.SummaryFile,
-		"routeviews_base_url":    cfg.RouteViewsBaseURL,
-		"ripe_ris_base_url":      cfg.RIPERISBaseURL,
-		"month":                  cfg.Month,
+		"enabled":                  cfg.Enabled,
+		"mode":                     cfg.Mode,
+		"routeviews_enabled":       cfg.RouteViewsEnabled,
+		"ripe_ris_enabled":         cfg.RIPERISEnabled,
+		"collectors":               cfg.Collectors,
+		"include_updates":          cfg.IncludeUpdates,
+		"history_snapshots":        cfg.HistorySnapshots,
+		"refresh_hours":            int(cfg.RefreshInterval / time.Hour),
+		"max_parallel_downloads":   cfg.MaxParallelDownloads,
+		"download_timeout_seconds": int(cfg.DownloadTimeout / time.Second),
+		"max_parallel_parse":       cfg.MaxParallelParse,
+		"keep_raw":                 cfg.KeepRaw,
+		"raw_retention_days":       cfg.RawRetentionDays,
+		"summary_file":             cfg.SummaryFile,
+		"index_mode":               cfg.IndexMode,
+		"index_file":               cfg.IndexFile,
+		"routeviews_base_url":      cfg.RouteViewsBaseURL,
+		"ripe_ris_base_url":        cfg.RIPERISBaseURL,
+		"month":                    cfg.Month,
 	}
 }
 
@@ -362,8 +664,14 @@ type adminConfigPatch struct {
 		OpenAIAPIKey     string   `json:"openai_api_key"`
 		OpenAIModel      string   `json:"openai_model"`
 		OpenAIBaseURL    string   `json:"openai_base_url"`
-		OllamaModel      string   `json:"ollama_model"`
-		OllamaBaseURL    string   `json:"ollama_base_url"`
+		OpenAIAPIType    string   `json:"openai_api_type"`
+		AnthropicAPIKey  string   `json:"anthropic_api_key"`
+		AnthropicModel   string   `json:"anthropic_model"`
+		AnthropicBaseURL string   `json:"anthropic_base_url"`
+		AnthropicVersion string   `json:"anthropic_version"`
+		GeminiAPIKey     string   `json:"gemini_api_key"`
+		GeminiModel      string   `json:"gemini_model"`
+		GeminiBaseURL    string   `json:"gemini_base_url"`
 		ConfidenceCutoff *float64 `json:"confidence_cutoff"`
 		TimeoutSeconds   *int     `json:"timeout_seconds"`
 		MaxCache         *int     `json:"max_cache"`
@@ -388,6 +696,11 @@ type adminConfigPatch struct {
 		ChallengeScore         *int     `json:"challenge_score"`
 		RateLimitScore         *int     `json:"rate_limit_score"`
 	} `json:"quality"`
+	Performance *struct {
+		Enabled           *bool `json:"enabled"`
+		IncludeDefault    *bool `json:"include_default"`
+		ThirdPartyDefault *bool `json:"third_party_default"`
+	} `json:"performance"`
 	DynamicRules *struct {
 		Enabled                *bool    `json:"enabled"`
 		File                   string   `json:"file"`
@@ -444,10 +757,13 @@ type adminConfigPatch struct {
 		HistorySnapshots     *int     `json:"history_snapshots"`
 		RefreshHours         *int     `json:"refresh_hours"`
 		MaxParallelDownloads *int     `json:"max_parallel_downloads"`
+		DownloadTimeoutSecs  *int     `json:"download_timeout_seconds"`
 		MaxParallelParse     *int     `json:"max_parallel_parse"`
 		KeepRaw              *bool    `json:"keep_raw"`
 		RawRetentionDays     *int     `json:"raw_retention_days"`
 		SummaryFile          string   `json:"summary_file"`
+		IndexMode            string   `json:"index_mode"`
+		IndexFile            string   `json:"index_file"`
 		RouteViewsBaseURL    string   `json:"routeviews_base_url"`
 		RIPERISBaseURL       string   `json:"ripe_ris_base_url"`
 		Month                string   `json:"month"`
@@ -524,11 +840,29 @@ func applyAdminConfigPatch(cfg config.Config, body []byte) (config.Config, error
 		if strings.TrimSpace(patch.AI.OpenAIBaseURL) != "" {
 			cfg.AI.OpenAIBaseURL = strings.TrimSpace(patch.AI.OpenAIBaseURL)
 		}
-		if strings.TrimSpace(patch.AI.OllamaModel) != "" {
-			cfg.AI.OllamaModel = strings.TrimSpace(patch.AI.OllamaModel)
+		if strings.TrimSpace(patch.AI.OpenAIAPIType) != "" {
+			cfg.AI.OpenAIAPIType = strings.TrimSpace(patch.AI.OpenAIAPIType)
 		}
-		if strings.TrimSpace(patch.AI.OllamaBaseURL) != "" {
-			cfg.AI.OllamaBaseURL = strings.TrimSpace(patch.AI.OllamaBaseURL)
+		if strings.TrimSpace(patch.AI.AnthropicAPIKey) != "" {
+			cfg.AI.AnthropicAPIKey = strings.TrimSpace(patch.AI.AnthropicAPIKey)
+		}
+		if strings.TrimSpace(patch.AI.AnthropicModel) != "" {
+			cfg.AI.AnthropicModel = strings.TrimSpace(patch.AI.AnthropicModel)
+		}
+		if strings.TrimSpace(patch.AI.AnthropicBaseURL) != "" {
+			cfg.AI.AnthropicBaseURL = strings.TrimSpace(patch.AI.AnthropicBaseURL)
+		}
+		if strings.TrimSpace(patch.AI.AnthropicVersion) != "" {
+			cfg.AI.AnthropicVersion = strings.TrimSpace(patch.AI.AnthropicVersion)
+		}
+		if strings.TrimSpace(patch.AI.GeminiAPIKey) != "" {
+			cfg.AI.GeminiAPIKey = strings.TrimSpace(patch.AI.GeminiAPIKey)
+		}
+		if strings.TrimSpace(patch.AI.GeminiModel) != "" {
+			cfg.AI.GeminiModel = strings.TrimSpace(patch.AI.GeminiModel)
+		}
+		if strings.TrimSpace(patch.AI.GeminiBaseURL) != "" {
+			cfg.AI.GeminiBaseURL = strings.TrimSpace(patch.AI.GeminiBaseURL)
 		}
 		if patch.AI.ConfidenceCutoff != nil && *patch.AI.ConfidenceCutoff > 0 && *patch.AI.ConfidenceCutoff <= 1 {
 			cfg.AI.ConfidenceCutoff = *patch.AI.ConfidenceCutoff
@@ -562,6 +896,9 @@ func applyAdminConfigPatch(cfg config.Config, body []byte) (config.Config, error
 	}
 	if patch.Quality != nil {
 		applyAdminQualityPatch(&cfg, patch.Quality)
+	}
+	if patch.Performance != nil {
+		applyAdminPerformancePatch(&cfg, patch.Performance)
 	}
 	if patch.DynamicRules != nil {
 		applyAdminDynamicRulesPatch(&cfg, patch.DynamicRules)
@@ -620,6 +957,9 @@ func applyAdminConfigPatch(cfg config.Config, body []byte) (config.Config, error
 		if patch.BGP.MaxParallelDownloads != nil && *patch.BGP.MaxParallelDownloads > 0 {
 			cfg.BGP.MaxParallelDownloads = *patch.BGP.MaxParallelDownloads
 		}
+		if patch.BGP.DownloadTimeoutSecs != nil && *patch.BGP.DownloadTimeoutSecs > 0 {
+			cfg.BGP.DownloadTimeout = time.Duration(*patch.BGP.DownloadTimeoutSecs) * time.Second
+		}
 		if patch.BGP.MaxParallelParse != nil && *patch.BGP.MaxParallelParse > 0 {
 			cfg.BGP.MaxParallelParse = *patch.BGP.MaxParallelParse
 		}
@@ -631,6 +971,12 @@ func applyAdminConfigPatch(cfg config.Config, body []byte) (config.Config, error
 		}
 		if patch.BGP.SummaryFile != "" {
 			cfg.BGP.SummaryFile = patch.BGP.SummaryFile
+		}
+		if patch.BGP.IndexMode != "" {
+			cfg.BGP.IndexMode = patch.BGP.IndexMode
+		}
+		if patch.BGP.IndexFile != "" {
+			cfg.BGP.IndexFile = patch.BGP.IndexFile
 		}
 		if patch.BGP.RouteViewsBaseURL != "" {
 			cfg.BGP.RouteViewsBaseURL = patch.BGP.RouteViewsBaseURL
@@ -695,6 +1041,22 @@ func applyAdminQualityPatch(cfg *config.Config, patch *struct {
 	}
 	if patch.RateLimitScore != nil && *patch.RateLimitScore > 0 && *patch.RateLimitScore <= 100 {
 		cfg.Quality.RateLimitScore = *patch.RateLimitScore
+	}
+}
+
+func applyAdminPerformancePatch(cfg *config.Config, patch *struct {
+	Enabled           *bool `json:"enabled"`
+	IncludeDefault    *bool `json:"include_default"`
+	ThirdPartyDefault *bool `json:"third_party_default"`
+}) {
+	if patch.Enabled != nil {
+		cfg.Performance.Enabled = *patch.Enabled
+	}
+	if patch.IncludeDefault != nil {
+		cfg.Performance.IncludeDefault = *patch.IncludeDefault
+	}
+	if patch.ThirdPartyDefault != nil {
+		cfg.Performance.ThirdPartyDefault = *patch.ThirdPartyDefault
 	}
 }
 
@@ -863,6 +1225,372 @@ func nonNilStrings(values []string) []string {
 	return values
 }
 
+type offlineLibraryInfo struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Kind        string `json:"kind"`
+	Path        string `json:"path,omitempty"`
+	SourceURL   string `json:"source_url,omitempty"`
+	Exists      bool   `json:"exists"`
+	Status      string `json:"status"`
+	Size        string `json:"size,omitempty"`
+	SizeBytes   int64  `json:"size_bytes,omitempty"`
+	UpdatedAt   string `json:"updated_at,omitempty"`
+	Version     string `json:"version,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+func offlineLibraries(cfg config.Config, status store.Status) []offlineLibraryInfo {
+	rawSources, manifestVersion, manifestUpdatedAt := rawManifest(cfg.DataDir)
+	rawFiles := status.RawFiles
+	if rawFiles == nil {
+		rawFiles = map[string]string{}
+	}
+	rawPath := func(key, fallback string) string {
+		if path := strings.TrimSpace(rawFiles[key]); path != "" {
+			return path
+		}
+		if fallback == "" {
+			return ""
+		}
+		return filepath.Join(cfg.DataDir, "raw", fallback)
+	}
+	source := func(key, fallback string) string {
+		if value := strings.TrimSpace(rawSources[key]); value != "" {
+			return value
+		}
+		return fallback
+	}
+
+	rows := []offlineLibraryInfo{}
+	addFile := func(id, name, kind, path, sourceURL, description string) {
+		rows = append(rows, libraryFileInfo(id, name, kind, path, sourceURL, description))
+	}
+	addFile("caida_ipv4", "CAIDA Prefix2AS IPv4", "基础路由库", rawPath("caida_ipv4", "caida-ipv4.pfx2as.gz"), source("caida_ipv4", cfg.Sources.CAIDAv4LogURL), "IPv4 IP 到 ASN 的主离线库")
+	addFile("caida_ipv6", "CAIDA Prefix2AS IPv6", "基础路由库", rawPath("caida_ipv6", "caida-ipv6.pfx2as.gz"), source("caida_ipv6", cfg.Sources.CAIDAv6LogURL), "IPv6 IP 到 ASN 的主离线库")
+
+	rirNames := sortedMapKeys(cfg.Sources.RIRURLs)
+	for _, name := range rirNames {
+		key := "rir_" + name
+		path := rawPath(key, "rir-"+name+".txt")
+		if strings.TrimSpace(rawFiles["rir-"+name]) != "" {
+			path = rawFiles["rir-"+name]
+		}
+		addFile(key, "RIR delegated "+name, "注册分配库", path, source(key, cfg.Sources.RIRURLs[name]), "ASN、国家、注册局和分配状态")
+	}
+
+	peeringRows := []struct {
+		id, name, file, url, description string
+	}{
+		{"peeringdb", "PeeringDB Networks", "peeringdb-net.json", cfg.Sources.PeeringDBURL, "ASN 网络画像"},
+		{"peeringdb_ix", "PeeringDB IX", "peeringdb-ix.json", cfg.Sources.PeeringDBIXURL, "IXP 基础信息"},
+		{"peeringdb_netixlan", "PeeringDB NetIXLAN", "peeringdb-netixlan.json", cfg.Sources.PeeringDBNetIXLANURL, "ASN 与 IXP 连接信息"},
+		{"peeringdb_facility", "PeeringDB Facilities", "peeringdb-fac.json", cfg.Sources.PeeringDBFacilityURL, "机房基础信息"},
+		{"peeringdb_netfac", "PeeringDB NetFacility", "peeringdb-netfac.json", cfg.Sources.PeeringDBNetFacilityURL, "ASN 与机房 presence"},
+	}
+	for _, row := range peeringRows {
+		addFile(row.id, row.name, "互联与机房库", rawPath(row.id, row.file), source(row.id, row.url), row.description)
+	}
+
+	ianaNames := sortedMapKeys(cfg.Sources.IANARDAPURLs)
+	for _, name := range ianaNames {
+		key := "iana_rdap_" + name
+		addFile(key, "IANA RDAP "+name, "RDAP 引导库", rawPath(key, "iana-rdap-"+name+".json"), source(key, cfg.Sources.IANARDAPURLs[name]), "RDAP 查询入口")
+	}
+
+	for index, url := range cfg.Sources.RPKIVRPURLs {
+		key := "rpki_vrp_" + strconv.Itoa(index)
+		file := optionalDownloadName("rpki-vrps", index, ".csv", url)
+		addFile(key, "RPKI VRP "+strconv.Itoa(index+1), "路由安全库", rawPath(key, file), source(key, url), "ROA 授权校验")
+	}
+	for index, url := range cfg.Sources.IRRRouteURLs {
+		key := "irr_route_" + strconv.Itoa(index)
+		file := optionalDownloadName("irr-routes", index, ".db", url)
+		addFile(key, "IRR Route "+strconv.Itoa(index+1), "路由安全库", rawPath(key, file), source(key, url), "IRR route/route6 对象")
+	}
+	for index, url := range cfg.Sources.GeofeedURLs {
+		key := "geofeed_" + strconv.Itoa(index)
+		file := optionalDownloadName("geofeed", index, ".csv", url)
+		addFile(key, "Geofeed "+strconv.Itoa(index+1), "所在地增强库", rawPath(key, file), source(key, url), "RFC 8805 实际所在地")
+	}
+
+	dynamicRulesPath := cfg.DynamicRules.File
+	if strings.TrimSpace(dynamicRulesPath) == "" {
+		dynamicRulesPath = filepath.Join(cfg.DataDir, "generated", "services.json")
+	}
+	dynamic := libraryFileInfo("dynamic_rules", "动态服务规则", "生成规则库", dynamicRulesPath, "多个公开服务源", "爬虫、Tor、邮件、监控、云厂商、VPN/Proxy、风险网段等聚合规则")
+	if version, updatedAt := generatedRulesVersion(dynamicRulesPath); version != "" || updatedAt != "" {
+		dynamic.Version = version
+		dynamic.UpdatedAt = firstNonEmpty(updatedAt, dynamic.UpdatedAt)
+	}
+	rows = append(rows, dynamic)
+
+	rows = append(rows, ip2RegionLibraryInfo("ip2region_v4", "ip2region IPv4 XDB", cfg.IP2Region.V4File, cfg.IP2Region.V4DownloadURL, "IPv4 所在地全载库"))
+	rows = append(rows, ip2RegionLibraryInfo("ip2region_v6", "ip2region IPv6 XDB", cfg.IP2Region.V6File, cfg.IP2Region.V6DownloadURL, "IPv6 所在地全载库"))
+	rows = append(rows, libraryFileInfo("bgp_full_summary", "全量 BGP 多观察点摘要", "BGP 汇总库", resolveDataPath(cfg.DataDir, cfg.BGP.SummaryFile), cfg.BGP.RouteViewsBaseURL+" / "+cfg.BGP.RIPERISBaseURL, "RouteViews / RIPE RIS RIB 生成的本地查询摘要"))
+	rows = append(rows, libraryFileInfo("bgp_compact_index", "BGP 紧凑查询索引", "BGP 查询索引", resolveDataPath(cfg.DataDir, cfg.BGP.IndexFile), "本地生成", "由 BGP 摘要编译生成，查询优先加载以降低内存和启动解析成本"))
+	rows = append(rows, libraryDirInfo("firewall_lists", "防火墙 CIDR 输出", "生成列表", cfg.FirewallLists.OutputDir, "", "按国家、公司、场景生成的 CIDR 列表"))
+
+	if manifestVersion != "" || manifestUpdatedAt != "" {
+		rows = append([]offlineLibraryInfo{{
+			ID:          "base_manifest",
+			Name:        "基础离线库 Manifest",
+			Kind:        "更新清单",
+			Path:        filepath.Join(cfg.DataDir, "processed", "manifest.json"),
+			SourceURL:   "本地生成",
+			Exists:      fileExists(filepath.Join(cfg.DataDir, "processed", "manifest.json")),
+			Status:      statusFromExists(fileExists(filepath.Join(cfg.DataDir, "processed", "manifest.json"))),
+			Version:     manifestVersion,
+			UpdatedAt:   manifestUpdatedAt,
+			Description: "基础公开数据下载清单和来源 URL",
+		}}, rows...)
+	}
+	stateVersion, stateUpdatedAt := downloadStateVersion(filepath.Join(cfg.DataDir, "processed", "download-state.json"))
+	stateInfo := libraryFileInfo("download_state", "下载状态缓存", "更新状态", filepath.Join(cfg.DataDir, "processed", "download-state.json"), "本地生成", "记录公开源 ETag、Last-Modified、SHA256 和本地缓存文件，避免重复下载未变化内容")
+	stateInfo.Version = stateVersion
+	if stateUpdatedAt != "" {
+		stateInfo.UpdatedAt = stateUpdatedAt
+	}
+	rows = append([]offlineLibraryInfo{stateInfo}, rows...)
+
+	return rows
+}
+
+func downloadStateVersion(filePath string) (string, string) {
+	body, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", ""
+	}
+	var state struct {
+		Version   int       `json:"version"`
+		UpdatedAt time.Time `json:"updated_at"`
+	}
+	if err := json.Unmarshal(body, &state); err != nil {
+		return "", ""
+	}
+	version := ""
+	if state.Version > 0 {
+		version = strconv.Itoa(state.Version)
+	}
+	updatedAt := ""
+	if !state.UpdatedAt.IsZero() {
+		updatedAt = state.UpdatedAt.Format(time.RFC3339)
+	}
+	return version, updatedAt
+}
+
+func libraryFileInfo(id, name, kind, path, sourceURL, description string) offlineLibraryInfo {
+	info := offlineLibraryInfo{
+		ID:          id,
+		Name:        name,
+		Kind:        kind,
+		Path:        strings.TrimSpace(path),
+		SourceURL:   strings.TrimSpace(sourceURL),
+		Description: description,
+		Status:      "missing",
+	}
+	if info.Path == "" {
+		info.Status = "not_configured"
+		return info
+	}
+	file, err := os.Stat(info.Path)
+	if err != nil {
+		return info
+	}
+	info.Exists = true
+	info.Status = "ready"
+	info.SizeBytes = file.Size()
+	info.Size = humanBytes(file.Size())
+	info.UpdatedAt = file.ModTime().Format(time.RFC3339)
+	return info
+}
+
+func libraryDirInfo(id, name, kind, path, sourceURL, description string) offlineLibraryInfo {
+	info := libraryFileInfo(id, name, kind, path, sourceURL, description)
+	if info.Path == "" || !info.Exists {
+		return info
+	}
+	sizeBytes, fileCount, err := dirStats(info.Path)
+	if err != nil {
+		return info
+	}
+	info.SizeBytes = sizeBytes
+	info.Size = humanBytes(sizeBytes)
+	if fileCount > 0 {
+		info.Version = strconv.Itoa(fileCount) + " files"
+	}
+	return info
+}
+
+func ip2RegionLibraryInfo(id, name, path, sourceURL, description string) offlineLibraryInfo {
+	info := libraryFileInfo(id, name, "IP 所在地库", path, sourceURL, description)
+	if info.Exists {
+		if createdAt, err := readXDBCreatedAt(path); err == nil && createdAt > 0 {
+			info.Version = time.Unix(createdAt, 0).Format("2006-01-02 15:04:05")
+		}
+	}
+	if info.SourceURL == "" {
+		info.SourceURL = "需要在配置中填写授权下载地址"
+	}
+	return info
+}
+
+func optionalDownloadName(prefix string, index int, defaultExt string, sourceURL string) string {
+	name := prefix
+	if index > 0 {
+		name = prefix + "-" + strconv.Itoa(index)
+	}
+	ext := extensionFromURL(sourceURL)
+	if ext == "" {
+		ext = defaultExt
+	}
+	return name + ext
+}
+
+func resolveDataPath(dataDir, filePath string) string {
+	if filepath.IsAbs(filePath) {
+		return filePath
+	}
+	cleanData := filepath.Clean(dataDir)
+	cleanPath := filepath.Clean(filePath)
+	if cleanPath == cleanData || strings.HasPrefix(cleanPath, cleanData+string(os.PathSeparator)) {
+		return cleanPath
+	}
+	return filepath.Join(dataDir, filePath)
+}
+
+func extensionFromURL(sourceURL string) string {
+	base := path.Base(strings.Split(sourceURL, "?")[0])
+	if base == "." || base == "/" {
+		return ""
+	}
+	ext := path.Ext(base)
+	if ext == ".gz" {
+		withoutGzip := strings.TrimSuffix(base, ".gz")
+		inner := path.Ext(withoutGzip)
+		if inner != "" {
+			return inner + ".gz"
+		}
+	}
+	return ext
+}
+
+func rawManifest(dataDir string) (map[string]string, string, string) {
+	path := filepath.Join(dataDir, "processed", "manifest.json")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return map[string]string{}, "", ""
+	}
+	var payload struct {
+		Version   string            `json:"version"`
+		UpdatedAt time.Time         `json:"updated_at"`
+		RawFiles  map[string]string `json:"raw_files"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return map[string]string{}, "", ""
+	}
+	updatedAt := ""
+	if !payload.UpdatedAt.IsZero() {
+		updatedAt = payload.UpdatedAt.Format(time.RFC3339)
+	}
+	return payload.RawFiles, payload.Version, updatedAt
+}
+
+func generatedRulesVersion(path string) (string, string) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return "", ""
+	}
+	var payload struct {
+		Version   string    `json:"version"`
+		UpdatedAt time.Time `json:"updated_at"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", ""
+	}
+	updatedAt := ""
+	if !payload.UpdatedAt.IsZero() {
+		updatedAt = payload.UpdatedAt.Format(time.RFC3339)
+	}
+	return payload.Version, updatedAt
+}
+
+func readXDBCreatedAt(path string) (int64, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+	buf := make([]byte, 8)
+	if _, err := io.ReadFull(file, buf); err != nil {
+		return 0, err
+	}
+	return int64(binary.LittleEndian.Uint32(buf[4:8])), nil
+}
+
+func sortedMapKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func statusFromExists(exists bool) string {
+	if exists {
+		return "ready"
+	}
+	return "missing"
+}
+
+func dirStats(root string) (int64, int, error) {
+	var sizeBytes int64
+	var fileCount int
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil
+		}
+		sizeBytes += info.Size()
+		fileCount++
+		return nil
+	})
+	return sizeBytes, fileCount, err
+}
+
+func humanBytes(size int64) string {
+	const unit = 1024
+	if size < unit {
+		return strconv.FormatInt(size, 10) + " B"
+	}
+	value := float64(size)
+	for _, suffix := range []string{"KB", "MB", "GB", "TB"} {
+		value /= unit
+		if value < unit {
+			return strconv.FormatFloat(value, 'f', 2, 64) + " " + suffix
+		}
+	}
+	return strconv.FormatFloat(value/unit, 'f', 2, 64) + " PB"
+}
+
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -890,10 +1618,21 @@ func (s *Server) lookupHandler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Has("include_quality") {
 		includeQuality = boolQuery(r.URL.Query().Get("include_quality"))
 	}
+	performanceCfg := s.currentConfig().Performance
+	includePerformance := performanceCfg.Enabled && performanceCfg.IncludeDefault
+	if r.URL.Query().Has("include_performance") {
+		includePerformance = performanceCfg.Enabled && boolQuery(r.URL.Query().Get("include_performance"))
+	}
+	includeThirdPartyTiming := performanceCfg.ThirdPartyDefault
+	if r.URL.Query().Has("include_third_party_timing") {
+		includeThirdPartyTiming = boolQuery(r.URL.Query().Get("include_third_party_timing"))
+	}
 	writeJSON(w, http.StatusOK, s.lookup.LookupWithOptions(r.Context(), query, lookup.LookupOptions{
-		IncludeLocation:  includeLocation,
-		IncludeQuality:   includeQuality,
-		OnlineEnrichment: parseOnlineEnrichment(r.URL.Query().Get("online_enrichment")),
+		IncludeLocation:       includeLocation,
+		IncludeQuality:        includeQuality,
+		IncludePerformance:    includePerformance,
+		PerformanceThirdParty: includeThirdPartyTiming,
+		OnlineEnrichment:      parseOnlineEnrichment(r.URL.Query().Get("online_enrichment")),
 	}))
 }
 
@@ -1026,6 +1765,7 @@ const indexHTML = `<!doctype html>
     <input id="query" placeholder="输入 IP 或 ASN，例如 8.8.8.8 或 AS15169" autocomplete="off">
     <label class="check"><input id="include-location" type="checkbox">所在地</label>
     <label class="check"><input id="include-quality" type="checkbox">IP 质量</label>
+    <label class="check"><input id="include-performance" type="checkbox">性能</label>
     <label class="check">在线增强
       <select id="online-enrichment">
         <option value="fast">快速</option>
@@ -1045,6 +1785,7 @@ const result = document.getElementById('result');
 const refresh = document.getElementById('refresh');
 const includeLocation = document.getElementById('include-location');
 const includeQuality = document.getElementById('include-quality');
+const includePerformance = document.getElementById('include-performance');
 const onlineEnrichment = document.getElementById('online-enrichment');
 
 form.addEventListener('submit', async (event) => {
@@ -1062,6 +1803,7 @@ async function lookup(value) {
   const params = new URLSearchParams({ query: value, online_enrichment: onlineEnrichment.value });
   if (includeLocation.checked) params.set('include_location', '1');
   if (includeQuality.checked) params.set('include_quality', '1');
+  if (includePerformance.checked) params.set('include_performance', '1');
   const response = await fetch('/api/lookup?' + params.toString());
   const data = await response.json();
   if (!data.ok) {
@@ -1106,6 +1848,9 @@ async function lookup(value) {
   }
   if (data.ip_quality) {
     panels.splice(10, 0, '<div class="panel wide"><div class="label">IP 质量 / 纯净度</div><dl class="meta-list">' + renderIPQuality(data.ip_quality) + '</dl></div>');
+  }
+  if (data.performance) {
+    panels.splice(10, 0, '<div class="panel wide"><div class="label">性能指标</div><dl class="meta-list">' + renderPerformance(data.performance) + '</dl></div>');
   }
   if (data.service_policy) {
     panels.splice(10, 0, '<div class="panel wide"><div class="label">服务策略</div><dl class="meta-list">' + renderServicePolicy(data.service_policy) + '</dl></div>');
@@ -1170,6 +1915,29 @@ function renderIPQuality(info) {
     ['扣分原因', (info.risk_reasons || []).join(' / ')],
     ['正向信号', (info.positive_signals || []).join(' / ')]
   ].map(([label, value]) => '<dt>' + escapeHTML(label) + '</dt><dd>' + escapeHTML(value || '-') + '</dd>').join('');
+}
+
+function renderPerformance(info) {
+  const thirdParty = (info.third_party || []).map(item => {
+    const status = item.ok ? '成功' : '失败';
+    const url = item.url ? ' ' + item.url : '';
+    return item.name + ' ' + status + ' ' + (item.duration_ms || 0) + 'ms' + url;
+  }).join('； ');
+  return [
+    ['总耗时', msValue(info.total_ms)],
+    ['本地离线', msValue(info.local_offline_ms)],
+    ['在线增强', msValue(info.online_enrichment_ms)],
+    ['IP所在地', msValue(info.location_ms)],
+    ['质量评分', msValue(info.quality_ms)],
+    ['AI判断', msValue(info.ai_ms)],
+    ['在线缓存', info.cache_hit ? '命中' : '-'],
+    ['后台刷新', info.refresh_queued || info.refresh_in_progress ? '是' : '-'],
+    ['第三方源', thirdParty || '-']
+  ].map(([label, value]) => '<dt>' + escapeHTML(label) + '</dt><dd>' + escapeHTML(value || '-') + '</dd>').join('');
+}
+
+function msValue(value) {
+  return typeof value === 'number' ? value + 'ms' : '-';
 }
 
 function renderServicePolicy(policy) {
@@ -1259,12 +2027,30 @@ const adminHTML = `<!doctype html>
     button { height: 38px; padding: 0 14px; border: 0; border-radius: 8px; background: #1b5f9e; color: #fff; cursor: pointer; }
     button.secondary { background: #4b5563; }
     button:disabled { opacity: .6; cursor: not-allowed; }
+    .admin-tabs { display: flex; gap: 6px; align-items: end; border-bottom: 1px solid #d8dee6; margin: 0 0 16px; overflow-x: auto; }
+    .tab-button { height: 40px; border: 1px solid transparent; border-bottom: 0; border-radius: 8px 8px 0 0; background: transparent; color: #334155; font-weight: 600; white-space: nowrap; }
+    .tab-button.active { background: #fff; border-color: #d8dee6; color: #1b5f9e; }
+    .tab-button:focus-visible { outline: 2px solid #1b5f9e; outline-offset: 2px; }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
     .hint { color: #667085; }
     .surface { background: #fff; border: 1px solid #d8dee6; border-radius: 8px; padding: 14px; margin-bottom: 14px; }
     .status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
     .metric { border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; background: #fafbfc; }
     .metric .label { color: #667085; font-size: 12px; margin-bottom: 4px; }
     .metric .value { font-size: 16px; overflow-wrap: anywhere; }
+    .data-table { width: 100%; border-collapse: collapse; border: 1px solid #d8dee6; border-radius: 8px; overflow: hidden; background: #fff; }
+    .data-table th, .data-table td { border-bottom: 1px solid #e5eaf0; padding: 8px 9px; text-align: left; vertical-align: top; }
+    .data-table th { background: #f8fafc; color: #334155; font-weight: 600; }
+    .data-table tr:last-child td { border-bottom: 0; }
+    .data-table td { overflow-wrap: anywhere; }
+    .status-ready { color: #15803d; font-weight: 600; }
+    .status-missing, .status-not_configured { color: #b45309; font-weight: 600; }
+    .help-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .help-item { border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; background: #fafbfc; }
+    .help-title { font-weight: 700; margin-bottom: 4px; }
+    .help-group { color: #667085; font-size: 12px; margin-bottom: 6px; }
+    .help-impact { margin-top: 6px; color: #475569; font-size: 12px; }
     .progress-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 8px; }
     .progress-track { height: 12px; background: #e5eaf0; border-radius: 999px; overflow: hidden; }
     .progress-bar { height: 100%; width: 0%; background: #1b5f9e; transition: width .25s ease; }
@@ -1278,19 +2064,22 @@ const adminHTML = `<!doctype html>
     .step-done { border-color: #16a34a; background: #f0fdf4; }
     .step-failed { border-color: #dc2626; background: #fff1f2; }
     .config-section { margin-top: 18px; }
+    .config-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 0 0 14px; padding: 10px; border: 1px solid #d8dee6; border-radius: 8px; background: #fff; }
     .config-table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #d8dee6; border-radius: 8px; overflow: hidden; }
     .config-table th, .config-table td { border-bottom: 1px solid #e5eaf0; padding: 9px 10px; vertical-align: top; text-align: left; }
     .config-table th { width: 220px; background: #f8fafc; color: #334155; font-weight: 600; }
     .config-table tr:last-child th, .config-table tr:last-child td { border-bottom: 0; }
     input, select, textarea { width: 100%; box-sizing: border-box; border: 1px solid #c9d1d9; border-radius: 6px; padding: 8px 9px; font: inherit; background: #fff; color: #1d2733; }
     input[type="checkbox"] { width: 18px; height: 18px; padding: 0; }
+    .inline-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+    button.small { height: 36px; white-space: nowrap; }
     textarea { min-height: 74px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
     .field-help { margin-top: 6px; color: #667085; font-size: 12px; line-height: 1.45; }
     .optional-source { color: #475569; font-size: 12px; font-weight: 500; margin-left: 6px; }
     details { margin-top: 14px; }
     summary { cursor: pointer; font-weight: 600; color: #1b5f9e; }
     pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #111827; color: #e5e7eb; padding: 12px; border-radius: 8px; max-height: 260px; overflow: auto; }
-    @media (max-width: 900px) { .status-grid, .progress-steps { grid-template-columns: 1fr; } .config-table th { width: 150px; } }
+    @media (max-width: 900px) { .status-grid, .progress-steps, .help-grid { grid-template-columns: 1fr; } .config-table th { width: 150px; } .inline-control { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -1299,26 +2088,49 @@ const adminHTML = `<!doctype html>
   <div class="toolbar">
     <button id="load">读取配置</button>
     <button id="save">保存配置</button>
+    <button class="secondary" type="button" id="apply-defaults">填充公开默认源</button>
     <button class="secondary" id="update">更新离线库</button>
     <span class="hint" id="toolbar-hint"></span>
   </div>
 
-  <section id="update-progress" class="surface">
-    <div class="progress-head">
-      <strong>更新进度</strong>
-      <span id="progress-percent">0%</span>
-    </div>
-    <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
-    <div id="progress-current" class="progress-current">未开始</div>
-    <ol id="progress-steps" class="progress-steps"></ol>
+  <nav class="admin-tabs" role="tablist" aria-label="后台页面">
+    <button class="tab-button active" type="button" role="tab" aria-selected="true" data-tab="overview">概览</button>
+    <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab="libraries">离线库</button>
+    <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab="config">配置</button>
+    <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab="help">帮助</button>
+  </nav>
+
+  <section id="tab-overview" class="tab-panel active" data-tab-panel="overview">
+    <section id="update-progress" class="surface">
+      <div class="progress-head">
+        <strong>更新进度</strong>
+        <span id="progress-percent">0%</span>
+      </div>
+      <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
+      <div id="progress-current" class="progress-current">未开始</div>
+      <ol id="progress-steps" class="progress-steps"></ol>
+    </section>
+
+    <section class="surface">
+      <h2>数据库状态</h2>
+      <div id="db-status" class="status-grid"></div>
+    </section>
+
+    <section class="surface">
+      <h2>操作结果</h2>
+      <pre id="status"></pre>
+    </section>
   </section>
 
-  <section class="surface">
-    <h2>数据库状态</h2>
-    <div id="db-status" class="status-grid"></div>
+  <section id="tab-libraries" class="tab-panel" data-tab-panel="libraries">
+    <section class="surface">
+      <h2>离线库列表</h2>
+      <div id="offline-libraries"></div>
+    </section>
   </section>
 
-  <form id="config-form">
+  <section id="tab-config" class="tab-panel" data-tab-panel="config">
+    <form id="config-form">
     <section class="config-section">
       <h2>基础配置</h2>
       <table class="config-table">
@@ -1352,12 +2164,18 @@ const adminHTML = `<!doctype html>
       <h2>AI 与在线增强</h2>
       <table class="config-table">
         <tbody>
-          <tr><th>AI Provider</th><td><select id="cfg-ai-provider" data-path="ai.provider"><option value="auto">auto</option><option value="off">off</option><option value="openai">openai</option><option value="ollama">ollama</option></select></td></tr>
-          <tr><th>OpenAI API Key(留空不修改)</th><td><input id="cfg-ai-openai-api-key" data-path="ai.openai_api_key" data-secret="true" type="password" autocomplete="new-password"></td></tr>
-          <tr><th>OpenAI 模型</th><td><input id="cfg-ai-openai-model" data-path="ai.openai_model"></td></tr>
-          <tr><th>OpenAI Base URL</th><td><input id="cfg-ai-openai-base-url" data-path="ai.openai_base_url"></td></tr>
-          <tr><th>Ollama 模型</th><td><input id="cfg-ai-ollama-model" data-path="ai.ollama_model"></td></tr>
-          <tr><th>Ollama Base URL</th><td><input id="cfg-ai-ollama-base-url" data-path="ai.ollama_base_url"></td></tr>
+          <tr><th>AI Provider</th><td><select id="cfg-ai-provider" data-path="ai.provider"><option value="auto">auto</option><option value="off">off</option><option value="openai">openai</option><option value="anthropic">anthropic</option><option value="gemini">gemini</option></select></td></tr>
+          <tr data-ai-provider-scope="openai"><th>OpenAI API Key(留空不修改)</th><td><input id="cfg-ai-openai-api-key" data-path="ai.openai_api_key" data-secret="true" type="password" autocomplete="new-password"></td></tr>
+          <tr data-ai-provider-scope="openai"><th>OpenAI 模型</th><td><div class="inline-control"><select id="cfg-ai-openai-model" data-path="ai.openai_model" data-model-select-provider="openai"></select><button type="button" class="secondary small" data-model-provider="openai">刷新模型</button></div></td></tr>
+          <tr data-ai-provider-scope="openai"><th>OpenAI Base URL</th><td><input id="cfg-ai-openai-base-url" data-path="ai.openai_base_url"></td></tr>
+          <tr data-ai-provider-scope="openai"><th>OpenAI 接口类型</th><td><select id="cfg-ai-openai-api-type" data-path="ai.openai_api_type"><option value="responses">responses</option><option value="chat_completions">chat_completions</option></select></td></tr>
+          <tr data-ai-provider-scope="anthropic"><th>Anthropic API Key(留空不修改)</th><td><input id="cfg-ai-anthropic-api-key" data-path="ai.anthropic_api_key" data-secret="true" type="password" autocomplete="new-password"></td></tr>
+          <tr data-ai-provider-scope="anthropic"><th>Anthropic 模型</th><td><div class="inline-control"><select id="cfg-ai-anthropic-model" data-path="ai.anthropic_model" data-model-select-provider="anthropic"></select><button type="button" class="secondary small" data-model-provider="anthropic">刷新模型</button></div></td></tr>
+          <tr data-ai-provider-scope="anthropic"><th>Anthropic Base URL</th><td><input id="cfg-ai-anthropic-base-url" data-path="ai.anthropic_base_url"></td></tr>
+          <tr data-ai-provider-scope="anthropic"><th>Anthropic Version</th><td><input id="cfg-ai-anthropic-version" data-path="ai.anthropic_version"></td></tr>
+          <tr data-ai-provider-scope="gemini"><th>Gemini API Key(留空不修改)</th><td><input id="cfg-ai-gemini-api-key" data-path="ai.gemini_api_key" data-secret="true" type="password" autocomplete="new-password"></td></tr>
+          <tr data-ai-provider-scope="gemini"><th>Gemini 模型</th><td><div class="inline-control"><select id="cfg-ai-gemini-model" data-path="ai.gemini_model" data-model-select-provider="gemini"></select><button type="button" class="secondary small" data-model-provider="gemini">刷新模型</button></div></td></tr>
+          <tr data-ai-provider-scope="gemini"><th>Gemini Base URL</th><td><input id="cfg-ai-gemini-base-url" data-path="ai.gemini_base_url"></td></tr>
           <tr><th>AI 低置信度阈值</th><td><input id="cfg-ai-confidence-cutoff" data-path="ai.confidence_cutoff" data-type="float" type="number" min="0" max="1" step="0.01"></td></tr>
           <tr><th>AI 超时(秒)</th><td><input id="cfg-ai-timeout-seconds" data-path="ai.timeout_seconds" data-type="number" type="number" min="1"></td></tr>
           <tr><th>AI 缓存数量</th><td><input id="cfg-ai-max-cache" data-path="ai.max_cache" data-type="number" type="number" min="1"></td></tr>
@@ -1382,6 +2200,17 @@ const adminHTML = `<!doctype html>
           <tr><th>Review 分数</th><td><input id="cfg-quality-review-score" data-path="quality.review_score" data-type="number" type="number" min="1" max="100"></td></tr>
           <tr><th>Challenge 分数</th><td><input id="cfg-quality-challenge-score" data-path="quality.challenge_score" data-type="number" type="number" min="1" max="100"></td></tr>
           <tr><th>Rate Limit 分数</th><td><input id="cfg-quality-rate-limit-score" data-path="quality.rate_limit_score" data-type="number" type="number" min="1" max="100"></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="config-section">
+      <h2>性能指标</h2>
+      <table class="config-table">
+        <tbody>
+          <tr><th>启用性能指标</th><td><input id="cfg-performance-enabled" data-path="performance.enabled" type="checkbox"></td></tr>
+          <tr><th>默认输出性能指标</th><td><input id="cfg-performance-include-default" data-path="performance.include_default" type="checkbox"><div class="field-help">关闭时只有 include_performance=1 才会输出 performance。</div></td></tr>
+          <tr><th>默认输出第三方耗时</th><td><input id="cfg-performance-third-party-default" data-path="performance.third_party_default" type="checkbox"><div class="field-help">开启后会输出当前请求等待到的 Team Cymru、RIPEstat、RDAP、WHOIS、RIPE RIS 等在线源耗时。</div></td></tr>
         </tbody>
       </table>
     </section>
@@ -1415,10 +2244,13 @@ const adminHTML = `<!doctype html>
           <tr><th>历史快照数</th><td><input id="cfg-bgp-history-snapshots" data-path="bgp.history_snapshots" data-type="number" type="number" min="0"></td></tr>
           <tr><th>刷新间隔(小时)</th><td><input id="cfg-bgp-refresh-hours" data-path="bgp.refresh_hours" data-type="number" type="number" min="1"></td></tr>
           <tr><th>并发下载数</th><td><input id="cfg-bgp-max-parallel-downloads" data-path="bgp.max_parallel_downloads" data-type="number" type="number" min="1"></td></tr>
+          <tr><th>下载超时(秒)</th><td><input id="cfg-bgp-download-timeout-seconds" data-path="bgp.download_timeout_seconds" data-type="number" type="number" min="1"><div class="field-help">单个 RIB 大文件下载超时，默认 7200 秒；网络慢时可以继续调大。</div></td></tr>
           <tr><th>并发解析数</th><td><input id="cfg-bgp-max-parallel-parse" data-path="bgp.max_parallel_parse" data-type="number" type="number" min="1"></td></tr>
           <tr><th>保留原始 MRT</th><td><input id="cfg-bgp-keep-raw" data-path="bgp.keep_raw" type="checkbox"></td></tr>
           <tr><th>原始文件保留天数</th><td><input id="cfg-bgp-raw-retention-days" data-path="bgp.raw_retention_days" data-type="number" type="number" min="0"></td></tr>
           <tr><th>汇总文件</th><td><input id="cfg-bgp-summary-file" data-path="bgp.summary_file"></td></tr>
+          <tr><th>索引模式</th><td><input id="cfg-bgp-index-mode" data-path="bgp.index_mode"><div class="field-help">compact 为默认紧凑索引；jsonl 表示兼容旧的 JSONL 直接加载。</div></td></tr>
+          <tr><th>索引文件</th><td><input id="cfg-bgp-index-file" data-path="bgp.index_file"><div class="field-help">后台更新会从汇总文件编译生成，查询优先加载这个文件。</div></td></tr>
           <tr><th>RouteViews Base URL</th><td><input id="cfg-bgp-routeviews-base-url" data-path="bgp.routeviews_base_url"></td></tr>
           <tr><th>RIPE RIS Base URL</th><td><input id="cfg-bgp-ripe-ris-base-url" data-path="bgp.ripe_ris_base_url"></td></tr>
           <tr><th>指定月份</th><td><input id="cfg-bgp-month" data-path="bgp.month" placeholder="例如 2026.06，留空自动选择"></td></tr>
@@ -1488,10 +2320,20 @@ const adminHTML = `<!doctype html>
         </tbody>
       </table>
     </details>
-  </form>
+    <div class="config-actions">
+      <button type="button" id="save-config-inline">保存配置</button>
+      <button type="button" class="secondary" id="load-config-inline">重新读取</button>
+      <span class="hint">修改配置后点击这里保存。</span>
+    </div>
+    </form>
+  </section>
 
-  <h2>操作结果</h2>
-  <pre id="status"></pre>
+  <section id="tab-help" class="tab-panel" data-tab-panel="help">
+    <section class="surface">
+      <h2>配置帮助</h2>
+      <div id="config-help" class="help-grid"></div>
+    </section>
+  </section>
 </main>
 <script>
 const statusBox = document.getElementById('status');
@@ -1502,11 +2344,47 @@ const progressPercent = document.getElementById('progress-percent');
 const progressCurrent = document.getElementById('progress-current');
 const progressSteps = document.getElementById('progress-steps');
 const dbStatus = document.getElementById('db-status');
+const offlineLibraries = document.getElementById('offline-libraries');
+const configHelp = document.getElementById('config-help');
+const tabButtons = document.querySelectorAll('[data-tab]');
+const tabPanels = document.querySelectorAll('[data-tab-panel]');
 let pollTimer = null;
+let currentDefaults = {};
+let currentHelp = {};
+const builtInAIModels = {
+  openai: ['gpt-5.4-mini', 'gpt-5.4', 'gpt-5.4-nano', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4o', 'gpt-4o-mini'],
+  anthropic: ['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-haiku-4-5', 'claude-sonnet-4-5', 'claude-3-7-sonnet-latest'],
+  gemini: ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.5-flash-lite', 'gemini-2.0-flash']
+};
 
 document.getElementById('load').onclick = loadConfig;
 document.getElementById('save').onclick = saveConfigFromForm;
+document.getElementById('load-config-inline').onclick = loadConfig;
+document.getElementById('save-config-inline').onclick = saveConfigFromForm;
+document.getElementById('apply-defaults').onclick = () => applyPublicDefaults({ silent: false });
 updateButton.onclick = updateDB;
+tabButtons.forEach((button) => {
+  button.addEventListener('click', () => switchAdminTab(button.dataset.tab));
+});
+document.querySelectorAll('[data-model-provider]').forEach((button) => {
+  button.addEventListener('click', () => refreshAIModels(button.dataset.modelProvider, button));
+});
+const aiProviderSelect = document.getElementById('cfg-ai-provider');
+if (aiProviderSelect) {
+  aiProviderSelect.addEventListener('change', updateAIProviderVisibility);
+}
+
+function switchAdminTab(tabName) {
+  tabButtons.forEach((button) => {
+    const active = button.dataset.tab === tabName;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  tabPanels.forEach((panel) => {
+    const active = panel.dataset.tabPanel === tabName;
+    panel.classList.toggle('active', active);
+  });
+}
 
 async function loadConfig() {
   const res = await adminFetch('/api/admin/config');
@@ -1515,7 +2393,10 @@ async function loadConfig() {
     writeLog(data);
     return;
   }
+  currentDefaults = data.defaults || {};
+  currentHelp = data.help || {};
   fillConfigForm(data);
+  renderConfigHelp(currentHelp);
   writeLog({ ok: true, message: '配置已读取' });
   await pollStatus();
 }
@@ -1524,6 +2405,9 @@ async function saveConfigFromForm() {
   const payload = buildConfigPatch();
   const res = await adminFetch('/api/admin/config', { method: 'PUT', body: JSON.stringify(payload) });
   const data = await res.json();
+  if (res.ok && data.ok !== false) {
+    data.message = data.runtime_applied ? '配置已保存，AI 设置已热生效；监听地址、TLS 等仍需按提示重启。' : '配置已保存。';
+  }
   writeLog(data);
   if (res.ok && data.config) {
     fillConfigForm(data.config);
@@ -1552,9 +2436,13 @@ async function pollStatus() {
   }
   if (data.config) {
     toolbarHint.textContent = '配置文件已加载';
+    currentDefaults = data.config.defaults || currentDefaults || {};
+    currentHelp = data.config.help || currentHelp || {};
+    renderConfigHelp(currentHelp);
   }
   const database = data.database || {};
   renderDatabase(database);
+  renderOfflineLibraries(data.offline_libraries || []);
   renderProgress(database.update_progress);
   const active = !!(database.updating || (database.update_progress && database.update_progress.active));
   if (!active && pollTimer) {
@@ -1572,27 +2460,35 @@ function startPolling() {
 }
 
 function fillConfigForm(config) {
+  seedAIModelSelects((config && config.ai) || {});
   document.querySelectorAll('[data-path]').forEach((field) => {
     const value = readPath(config, field.dataset.path);
     if (field.dataset.secret === 'true') {
       field.value = '';
       field.placeholder = value ? '已配置，留空不修改' : '未配置';
+      applyFieldHelp(field);
       return;
     }
     if (field.type === 'checkbox') {
       field.checked = !!value;
+      applyFieldHelp(field);
       return;
     }
     if (field.dataset.type === 'list') {
       field.value = Array.isArray(value) ? value.join('\n') : '';
+      applyFieldHelp(field);
       return;
     }
     if (field.dataset.type === 'map') {
       field.value = mapToLines(value);
+      applyFieldHelp(field);
       return;
     }
     field.value = value === undefined || value === null ? '' : String(value);
+    applyFieldHelp(field);
   });
+  applyPublicDefaults({ silent: true });
+  updateAIProviderVisibility();
 }
 
 function buildConfigPatch() {
@@ -1639,6 +2535,52 @@ function renderDatabase(database) {
   dbStatus.innerHTML = rows.map((row) => '<div class="metric"><div class="label">' + escapeHTML(row[0]) + '</div><div class="value">' + escapeHTML(row[1]) + '</div></div>').join('');
 }
 
+function renderOfflineLibraries(items) {
+  if (!items.length) {
+    offlineLibraries.innerHTML = '<div class="hint">暂无离线库明细。先触发一次更新或检查数据目录。</div>';
+    return;
+  }
+  const rows = items.map((item) => {
+    const statusClass = 'status-' + escapeHTML(item.status || 'missing');
+    return '<tr>' +
+      '<td><strong>' + escapeHTML(item.name || item.id) + '</strong><div class="hint">' + escapeHTML(item.description || '') + '</div></td>' +
+      '<td>' + escapeHTML(item.kind || '-') + '</td>' +
+      '<td><span class="' + statusClass + '">' + escapeHTML(statusText(item.status, item.exists)) + '</span></td>' +
+      '<td>' + escapeHTML(item.size || '-') + '</td>' +
+      '<td>' + escapeHTML(item.version || '-') + '</td>' +
+      '<td>' + escapeHTML(formatTime(item.updated_at) || '-') + '</td>' +
+      '<td>' + escapeHTML(item.path || '-') + '</td>' +
+      '<td>' + escapeHTML(item.source_url || '-') + '</td>' +
+      '</tr>';
+  }).join('');
+  offlineLibraries.innerHTML = '<table class="data-table"><thead><tr><th>名称</th><th>类型</th><th>状态</th><th>大小</th><th>版本</th><th>更新时间</th><th>本地文件</th><th>来源</th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+function renderConfigHelp(help) {
+  const keys = Object.keys(help || {}).sort((a, b) => {
+    const ag = help[a].group || '';
+    const bg = help[b].group || '';
+    if (ag !== bg) return ag.localeCompare(bg);
+    return (help[a].title || a).localeCompare(help[b].title || b);
+  });
+  if (!keys.length) {
+    configHelp.innerHTML = '<div class="hint">暂无配置帮助。</div>';
+    return;
+  }
+  configHelp.innerHTML = keys.map((key) => {
+    const item = help[key] || {};
+    const impact = item.impact ? '<div class="help-impact">影响：' + escapeHTML(item.impact) + '</div>' : '';
+    const defaultText = item.default ? '<div class="help-impact">默认：' + escapeHTML(item.default) + '</div>' : '';
+    return '<div class="help-item"><div class="help-group">' + escapeHTML(item.group || '-') + ' / ' + escapeHTML(key) + '</div><div class="help-title">' + escapeHTML(item.title || key) + '</div><div>' + escapeHTML(item.help || '-') + '</div>' + impact + defaultText + '</div>';
+  }).join('');
+}
+
+function statusText(status, exists) {
+  if (status === 'ready' || exists) return '已下载';
+  if (status === 'not_configured') return '未配置';
+  return '缺失';
+}
+
 function renderProgress(progress) {
   const percent = clampPercent(progress && typeof progress.percent === 'number' ? progress.percent : 0);
   progressBar.style.width = percent + '%';
@@ -1657,6 +2599,98 @@ function renderProgress(progress) {
     const duration = step.duration ? ' / ' + step.duration : '';
     return '<li class="' + cls.trim() + '"><div class="step-name">' + escapeHTML((step.index + 1) + '. ' + step.name) + '</div><div class="step-status">' + escapeHTML(status + duration) + '</div><div class="step-detail">' + escapeHTML(step.detail || '-') + '</div></li>';
   }).join('');
+}
+
+function updateAIProviderVisibility() {
+  const provider = (document.getElementById('cfg-ai-provider')?.value || 'auto').toLowerCase();
+  document.querySelectorAll('[data-ai-provider-scope]').forEach((row) => {
+    const scope = row.getAttribute('data-ai-provider-scope');
+    row.hidden = provider === 'off' || (provider !== 'auto' && scope !== provider);
+  });
+}
+
+async function refreshAIModels(provider, button) {
+  const originalText = button ? button.textContent : '';
+  if (button) {
+    button.disabled = true;
+    button.textContent = '加载中';
+  }
+  try {
+    const res = await adminFetch('/api/admin/ai/models', {
+      method: 'POST',
+      body: JSON.stringify(aiModelPayload(provider))
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) {
+      writeLog(data);
+      return;
+    }
+    populateAIModelList(provider, data.models || []);
+    const sourceText = data.source === 'cache' ? '缓存' : (data.source === 'fallback' ? '内置候选' : '在线');
+    writeLog({ ok: true, message: provider + ' 模型列表已更新（' + sourceText + '）', count: (data.models || []).length, source: data.source || 'online', error: data.error || '' });
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
+}
+
+function seedAIModelSelects(aiConfig) {
+  populateAIModelList('openai', aiModelsWithConfigured('openai', aiConfig.openai_model));
+  populateAIModelList('anthropic', aiModelsWithConfigured('anthropic', aiConfig.anthropic_model));
+  populateAIModelList('gemini', aiModelsWithConfigured('gemini', aiConfig.gemini_model));
+}
+
+function aiModelsWithConfigured(provider, configured) {
+  const values = [];
+  if (configured) values.push(configured);
+  (builtInAIModels[provider] || []).forEach((id) => values.push(id));
+  return values.map((id) => ({ id, name: id, provider }));
+}
+
+function aiModelPayload(provider) {
+  const payload = { provider };
+  const keyField = document.getElementById('cfg-ai-' + provider + '-api-key');
+  const baseField = document.getElementById('cfg-ai-' + provider + '-base-url');
+  const versionField = document.getElementById('cfg-ai-' + provider + '-version');
+  if (keyField && keyField.value.trim()) payload.api_key = keyField.value.trim();
+  if (baseField && baseField.value.trim()) payload.base_url = baseField.value.trim();
+  if (versionField && versionField.value.trim()) payload.version = versionField.value.trim();
+  return payload;
+}
+
+function populateAIModelList(provider, models) {
+  const select = document.getElementById('cfg-ai-' + provider + '-model');
+  if (!select) return;
+  const currentValue = select.value.trim();
+  const merged = mergeAIModelOptions(provider, currentValue, models);
+  select.innerHTML = merged.map((model) => {
+    const id = model.id || '';
+    const label = [model.name && model.name !== id ? model.name : '', model.owned_by].filter(Boolean).join(' / ');
+    const text = label ? id + ' - ' + label : id;
+    return '<option value="' + escapeHTML(id) + '">' + escapeHTML(text) + '</option>';
+  }).join('');
+  if (currentValue) {
+    select.value = currentValue;
+  } else if (merged.length && merged[0].id) {
+    select.value = merged[0].id;
+  }
+}
+
+function mergeAIModelOptions(provider, currentValue, models) {
+  const merged = [];
+  const seen = new Set();
+  const add = (model) => {
+    const id = String((model && model.id) || '').trim();
+    if (!id || seen.has(id.toLowerCase())) return;
+    seen.add(id.toLowerCase());
+    merged.push(Object.assign({ name: id, provider }, model, { id }));
+  };
+  if (currentValue) add({ id: currentValue, name: currentValue, provider });
+  (builtInAIModels[provider] || []).forEach((id) => add({ id, name: id, provider }));
+  (models || []).forEach(add);
+  return merged;
 }
 
 async function adminFetch(url, options = {}) {
@@ -1691,6 +2725,52 @@ function writePath(object, path, value) {
     current = current[key];
   }
   current[keys[keys.length - 1]] = value;
+}
+
+function applyFieldHelp(field) {
+  const item = currentHelp && currentHelp[field.dataset.path];
+  const defaultValue = readPath(currentDefaults, field.dataset.path);
+  if (item && item.help) {
+    field.title = item.help;
+    field.setAttribute('aria-label', (item.title || field.dataset.path) + '：' + item.help);
+  }
+  if (field.dataset.secret === 'true') return;
+  if ((field.value === '' || field.value === undefined) && defaultValue !== undefined && defaultValue !== null && defaultValue !== '' && !Array.isArray(defaultValue)) {
+    field.placeholder = '默认：' + defaultValue;
+  }
+  if (item && item.default && !field.placeholder) {
+    field.placeholder = item.default;
+  }
+}
+
+function applyPublicDefaults(options = {}) {
+  let changed = 0;
+  document.querySelectorAll('[data-path]').forEach((field) => {
+    const path = field.dataset.path;
+    if (!isPublicDefaultPath(path) || field.dataset.secret === 'true' || field.type === 'checkbox') return;
+    const current = field.value.trim();
+    if (current) return;
+    const value = readPath(currentDefaults, path);
+    if (value === undefined || value === null || value === '' || (Array.isArray(value) && value.length === 0)) return;
+    if (field.dataset.type === 'list') {
+      field.value = Array.isArray(value) ? value.join('\n') : String(value);
+    } else if (field.dataset.type === 'map') {
+      field.value = mapToLines(value);
+    } else {
+      field.value = String(value);
+    }
+    changed++;
+  });
+  if (!options.silent) {
+    writeLog({ ok: true, message: changed ? '已填充 ' + changed + ' 个公开默认源，保存配置后生效。' : '没有可填充的公开默认源。商业授权、本地路径和 Token 需要手动配置。' });
+  }
+}
+
+function isPublicDefaultPath(path) {
+  return path.startsWith('sources.') ||
+    (path.startsWith('dynamic_rules.') && !path.startsWith('dynamic_rules.ip2proxy.') && path !== 'dynamic_rules.file') ||
+    path === 'bgp.routeviews_base_url' ||
+    path === 'bgp.ripe_ris_base_url';
 }
 
 function parseList(value) {

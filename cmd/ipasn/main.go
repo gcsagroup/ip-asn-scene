@@ -60,11 +60,14 @@ func run(args []string) int {
 	fs.StringVar(&cfg.TLS.CertFile, "tls-cert-file", cfg.TLS.CertFile, "TLS certificate file")
 	fs.StringVar(&cfg.TLS.KeyFile, "tls-key", cfg.TLS.KeyFile, "TLS private key file")
 	fs.StringVar(&cfg.TLS.KeyFile, "tls-key-file", cfg.TLS.KeyFile, "TLS private key file")
-	fs.StringVar(&cfg.AI.Provider, "ai-provider", cfg.AI.Provider, "AI provider: auto, off, openai, ollama")
+	fs.StringVar(&cfg.AI.Provider, "ai-provider", cfg.AI.Provider, "AI provider: auto, off, openai, anthropic, gemini")
 	fs.StringVar(&cfg.AI.OpenAIModel, "openai-model", cfg.AI.OpenAIModel, "OpenAI model")
-	fs.StringVar(&cfg.AI.OpenAIBaseURL, "openai-base-url", cfg.AI.OpenAIBaseURL, "OpenAI Responses API URL")
-	fs.StringVar(&cfg.AI.OllamaModel, "ollama-model", cfg.AI.OllamaModel, "Ollama model")
-	fs.StringVar(&cfg.AI.OllamaBaseURL, "ollama-base-url", cfg.AI.OllamaBaseURL, "Ollama base URL")
+	fs.StringVar(&cfg.AI.OpenAIBaseURL, "openai-base-url", cfg.AI.OpenAIBaseURL, "OpenAI-compatible base URL")
+	fs.StringVar(&cfg.AI.OpenAIAPIType, "openai-api-type", cfg.AI.OpenAIAPIType, "OpenAI API type: responses or chat_completions")
+	fs.StringVar(&cfg.AI.AnthropicModel, "anthropic-model", cfg.AI.AnthropicModel, "Anthropic model")
+	fs.StringVar(&cfg.AI.AnthropicBaseURL, "anthropic-base-url", cfg.AI.AnthropicBaseURL, "Anthropic base URL")
+	fs.StringVar(&cfg.AI.GeminiModel, "gemini-model", cfg.AI.GeminiModel, "Gemini model")
+	fs.StringVar(&cfg.AI.GeminiBaseURL, "gemini-base-url", cfg.AI.GeminiBaseURL, "Gemini base URL")
 	fs.BoolVar(&cfg.Enrichment.Enabled, "enrichment", cfg.Enrichment.Enabled, "enable online enrichment for unannounced allocated IPs")
 	fs.BoolVar(&cfg.Enrichment.AsyncOnMiss, "enrichment-async-on-miss", cfg.Enrichment.AsyncOnMiss, "return cached/offline results immediately and refresh online enrichment in background")
 	enrichmentForegroundTimeoutMS := fs.Int("enrichment-foreground-timeout-ms", int(cfg.Enrichment.ForegroundTimeout/time.Millisecond), "foreground wait budget for online enrichment cache misses")
@@ -185,6 +188,7 @@ func serve(ctx context.Context, cfg config.Config, downloadOnly, updateOnStart b
 		IncludeLocationDefault: cfg.IP2Region.IncludeDefault,
 		Config:                 cfg,
 		ConfigStore:            manager,
+		RuntimeConfigApplier:   aiRuntimeConfigApplier{service: lookupService},
 	})
 
 	httpServer := &http.Server{Addr: cfg.Addr, Handler: server}
@@ -221,6 +225,18 @@ func serve(ctx context.Context, cfg config.Config, downloadOnly, updateOnStart b
 	case err := <-serverErr:
 		return err
 	}
+}
+
+type aiRuntimeConfigApplier struct {
+	service *lookup.Service
+}
+
+func (a aiRuntimeConfigApplier) ApplyRuntimeConfig(cfg config.Config) error {
+	if a.service == nil {
+		return nil
+	}
+	a.service.SetAIAdvisor(buildAdvisor(cfg), cfg.AI.ConfidenceCutoff)
+	return nil
 }
 
 func qualityConfig(cfg config.Config) quality.Config {
@@ -473,37 +489,75 @@ func buildGeoLocator(cfg config.Config) geo.Locator {
 }
 
 func buildAdvisor(cfg config.Config) ai.Advisor {
-	switch cfg.AI.Provider {
+	switch strings.ToLower(strings.TrimSpace(cfg.AI.Provider)) {
 	case "off":
 		return nil
 	case "openai":
-		if cfg.AI.OpenAIAPIKey == "" {
-			log.Printf("AI provider openai selected, but OPENAI_API_KEY is empty")
-			return nil
-		}
-		return ai.NewOpenAIAdvisor(ai.Config{
-			APIKey:   cfg.AI.OpenAIAPIKey,
-			Model:    cfg.AI.OpenAIModel,
-			BaseURL:  cfg.AI.OpenAIBaseURL,
-			Timeout:  cfg.AI.Timeout,
-			MaxCache: cfg.AI.MaxCache,
-		})
-	case "ollama":
-		return ai.NewOllamaAdvisor(ai.Config{
-			Model:   cfg.AI.OllamaModel,
-			BaseURL: cfg.AI.OllamaBaseURL,
-			Timeout: cfg.AI.Timeout,
-		})
+		return buildOpenAIAdvisor(cfg, true)
+	case "anthropic":
+		return buildAnthropicAdvisor(cfg, true)
+	case "gemini":
+		return buildGeminiAdvisor(cfg, true)
 	default:
 		if cfg.AI.OpenAIAPIKey != "" {
-			return ai.NewOpenAIAdvisor(ai.Config{
-				APIKey:   cfg.AI.OpenAIAPIKey,
-				Model:    cfg.AI.OpenAIModel,
-				BaseURL:  cfg.AI.OpenAIBaseURL,
-				Timeout:  cfg.AI.Timeout,
-				MaxCache: cfg.AI.MaxCache,
-			})
+			return buildOpenAIAdvisor(cfg, false)
+		}
+		if cfg.AI.AnthropicAPIKey != "" {
+			return buildAnthropicAdvisor(cfg, false)
+		}
+		if cfg.AI.GeminiAPIKey != "" {
+			return buildGeminiAdvisor(cfg, false)
 		}
 		return nil
 	}
+}
+
+func buildOpenAIAdvisor(cfg config.Config, logMissing bool) ai.Advisor {
+	if strings.TrimSpace(cfg.AI.OpenAIAPIKey) == "" {
+		if logMissing {
+			log.Printf("AI provider openai selected, but OPENAI_API_KEY is empty")
+		}
+		return nil
+	}
+	return ai.NewOpenAIAdvisor(ai.Config{
+		APIKey:   cfg.AI.OpenAIAPIKey,
+		Model:    cfg.AI.OpenAIModel,
+		BaseURL:  cfg.AI.OpenAIBaseURL,
+		APIType:  cfg.AI.OpenAIAPIType,
+		Timeout:  cfg.AI.Timeout,
+		MaxCache: cfg.AI.MaxCache,
+	})
+}
+
+func buildAnthropicAdvisor(cfg config.Config, logMissing bool) ai.Advisor {
+	if strings.TrimSpace(cfg.AI.AnthropicAPIKey) == "" {
+		if logMissing {
+			log.Printf("AI provider anthropic selected, but ANTHROPIC_API_KEY is empty")
+		}
+		return nil
+	}
+	return ai.NewAnthropicAdvisor(ai.Config{
+		APIKey:   cfg.AI.AnthropicAPIKey,
+		Model:    cfg.AI.AnthropicModel,
+		BaseURL:  cfg.AI.AnthropicBaseURL,
+		Version:  cfg.AI.AnthropicVersion,
+		Timeout:  cfg.AI.Timeout,
+		MaxCache: cfg.AI.MaxCache,
+	})
+}
+
+func buildGeminiAdvisor(cfg config.Config, logMissing bool) ai.Advisor {
+	if strings.TrimSpace(cfg.AI.GeminiAPIKey) == "" {
+		if logMissing {
+			log.Printf("AI provider gemini selected, but GEMINI_API_KEY is empty")
+		}
+		return nil
+	}
+	return ai.NewGeminiAdvisor(ai.Config{
+		APIKey:   cfg.AI.GeminiAPIKey,
+		Model:    cfg.AI.GeminiModel,
+		BaseURL:  cfg.AI.GeminiBaseURL,
+		Timeout:  cfg.AI.Timeout,
+		MaxCache: cfg.AI.MaxCache,
+	})
 }

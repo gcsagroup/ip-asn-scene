@@ -19,7 +19,7 @@
 - 支持 IP2Proxy 增强 `VPN`、`PROXY`、`TOR`
 - 支持 ip2region 返回 IP 所在地
 - 支持 IP 质量 / 纯净度评分，输出风险等级、扣分原因和建议动作
-- 支持 OpenAI 和 Ollama，只处理低置信度结果
+- 支持 OpenAI、Anthropic、Gemini 和 OpenAI 兼容服务，只处理低置信度结果
 - 支持 YAML 配置文件
 - 支持 HTTPS
 - 支持 Linux / Windows 安装为系统服务
@@ -90,6 +90,7 @@ http://localhost:18080/admin
 GET  /api/lookup?query=8.8.8.8
 GET  /api/lookup?query=8.8.8.8&include_location=1
 GET  /api/lookup?query=8.8.8.8&include_quality=1
+GET  /api/lookup?query=8.8.8.8&include_performance=1
 GET  /api/lookup?query=8.8.8.8&online_enrichment=wait
 GET  /api/lookup?query=AS15169
 GET  /api/quality?query=8.8.8.8
@@ -99,6 +100,7 @@ POST /api/db/update
 GET  /admin
 GET  /api/admin/config
 PUT  /api/admin/config
+POST /api/admin/ai/models
 GET  /api/admin/status
 POST /api/admin/update
 ```
@@ -106,6 +108,8 @@ POST /api/admin/update
 `include_location=1` 会返回 IP 所在地，包含国家、省/州、城市、运营商、国家码和所在地库自带的 ASN。页面里勾选“所在地”也是同样效果。
 
 `include_quality=1` 会返回 `ip_quality`，包含 0-100 评分、A-F 等级、风险等级、建议动作、风险原因、正向信号和分维度评分。页面里勾选“IP 质量”也是同样效果；也可以直接调用 `/api/quality?query=IP`。
+
+`include_performance=1` 会返回 `performance`，包含总耗时、本地离线查询、在线增强、所在地、质量评分、AI 和第三方在线源耗时。页面里勾选“性能”也是同样效果；第三方明细可用 `include_third_party_timing=0/1` 控制。
 
 `online_enrichment` 支持 `fast`、`wait`、`off`：`fast` 快速返回并后台刷新，`wait` 等联网增强完成或超时后返回，`off` 只使用离线库。
 
@@ -130,7 +134,7 @@ POST /api/admin/update
 - geofeed：RFC 8805 实际所在地增强，查询时优先于 ip2region
 - ip2region：IP 所在地和库内 ASN / ISP 补充
 - `data/generated/firewall`：按国家/地区、公司和场景生成的防火墙 CIDR 列表
-- OpenAI / Ollama：低置信度结果辅助判断
+- OpenAI / Anthropic / Gemini：低置信度结果辅助判断；OpenAI 兼容服务可通过自定义 Base URL 接入
 
 查询结果中的 `egress` 会结合 RIPE RIS AS Path 主上游、PeeringDB IXP / Facility、IP 所在地和注册信息，给出机房/出口推断。它会优先按 IP 当前宣告地和所在地匹配机房/IXP；匹配不上时不输出外地机房，只保留主上游 `TRANSIT` 证据。家庭宽带、移动网络、教育/政府/组织机构，以及公共 DNS/CDN 等 Anycast 服务，会避免把主上游 PeeringDB 机房误当成用户、基站、校园或办公出口。低置信度场景会结合主规则、RDAP / WHOIS、AI 和机房/出口信息做加权投票修正；高置信度命中会保留主规则，只把增强信息作为参考证据。
 
@@ -138,7 +142,7 @@ POST /api/admin/update
 
 ## 缓存和速度
 
-默认查询不实时解析全量 BGP，也不实时下载公网路由表。全量 BGP 只在后台更新阶段下载 MRT RIB，并生成 `data/generated/bgp-observations-full.jsonl.gz` 汇总索引；查询接口只读取本地汇总索引。
+默认查询不实时解析全量 BGP，也不实时下载公网路由表。全量 BGP 只在后台更新阶段下载 MRT RIB，生成 `data/generated/bgp-observations-full.jsonl.gz` 摘要，并编译 `data/generated/bgp-index.bin` 紧凑查询索引；查询接口优先读取本地紧凑索引。
 
 IP 查询优先返回本地离线库和缓存结果。缓存未命中时，会先给 Team Cymru、RIPEstat、RIPE RIS、RDAP、WHOIS 一个短前台等待窗口，默认最多 1500ms。
 

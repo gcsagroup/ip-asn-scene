@@ -26,10 +26,11 @@ import (
 )
 
 type generatedServiceRuleFile struct {
-	Version      string                 `json:"version"`
-	UpdatedAt    time.Time              `json:"updated_at"`
-	SourceErrors []string               `json:"source_errors,omitempty"`
-	Rules        []generatedServiceRule `json:"rules"`
+	Version       string                 `json:"version"`
+	UpdatedAt     time.Time              `json:"updated_at"`
+	DownloadStats DownloadStats          `json:"download_stats,omitempty"`
+	SourceErrors  []string               `json:"source_errors,omitempty"`
+	Rules         []generatedServiceRule `json:"rules"`
 }
 
 type generatedServiceRule struct {
@@ -82,6 +83,8 @@ func RefreshDynamicServiceRulesWithClient(ctx context.Context, cfg config.Config
 	if client == nil {
 		client = &http.Client{Timeout: cfg.HTTPTimeout}
 	}
+	cache := newDownloadCache(cfg.DataDir, client)
+	ctx = contextWithDownloadCache(ctx, cache)
 	if resolver == nil {
 		resolver = spfTXTLookupFunc(func(ctx context.Context, name string) ([]string, error) {
 			var r net.Resolver
@@ -167,10 +170,11 @@ func RefreshDynamicServiceRulesWithClient(ctx context.Context, cfg config.Config
 	})
 
 	encoded, err := json.MarshalIndent(generatedServiceRuleFile{
-		Version:      time.Now().UTC().Format("20060102T150405Z"),
-		UpdatedAt:    time.Now().UTC(),
-		SourceErrors: sourceErrors,
-		Rules:        rules,
+		Version:       time.Now().UTC().Format("20060102T150405Z"),
+		UpdatedAt:     time.Now().UTC(),
+		DownloadStats: cache.Stats(),
+		SourceErrors:  sourceErrors,
+		Rules:         rules,
 	}, "", "  ")
 	if err != nil {
 		return "", err
@@ -758,6 +762,9 @@ func bigIntToAddr(value *big.Int, bits int) (netip.Addr, bool) {
 }
 
 func downloadBytes(ctx context.Context, client *http.Client, url string) ([]byte, error) {
+	if cache := downloadCacheFromContext(ctx); cache != nil {
+		return cache.Bytes(ctx, url)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err

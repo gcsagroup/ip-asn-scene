@@ -8,21 +8,30 @@ import (
 )
 
 func TestLoadAIProviderFromEnv(t *testing.T) {
-	t.Setenv("AI_PROVIDER", "ollama")
-	t.Setenv("OLLAMA_BASE_URL", "http://localhost:11434")
-	t.Setenv("OLLAMA_MODEL", "qwen3:8b")
+	t.Setenv("AI_PROVIDER", "anthropic")
+	t.Setenv("ANTHROPIC_API_KEY", "anthropic-key")
+	t.Setenv("ANTHROPIC_MODEL", "claude-test")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+	t.Setenv("ANTHROPIC_VERSION", "2023-06-01")
+	t.Setenv("GEMINI_API_KEY", "gemini-key")
+	t.Setenv("GEMINI_MODEL", "gemini-test")
+	t.Setenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta")
+	t.Setenv("OPENAI_API_TYPE", "chat_completions")
 	t.Setenv("AI_CONFIDENCE_CUTOFF", "0.62")
 	t.Setenv("RULES_FILE", "rules/test-services.json")
 
 	cfg := Load()
-	if cfg.AI.Provider != "ollama" {
-		t.Fatalf("expected ollama provider, got %q", cfg.AI.Provider)
+	if cfg.AI.Provider != "anthropic" {
+		t.Fatalf("expected anthropic provider, got %q", cfg.AI.Provider)
 	}
-	if cfg.AI.OllamaBaseURL != "http://localhost:11434" {
-		t.Fatalf("unexpected Ollama base URL: %q", cfg.AI.OllamaBaseURL)
+	if cfg.AI.AnthropicAPIKey != "anthropic-key" || cfg.AI.AnthropicModel != "claude-test" || cfg.AI.AnthropicBaseURL != "https://api.anthropic.com" || cfg.AI.AnthropicVersion != "2023-06-01" {
+		t.Fatalf("unexpected Anthropic config: %#v", cfg.AI)
 	}
-	if cfg.AI.OllamaModel != "qwen3:8b" {
-		t.Fatalf("unexpected Ollama model: %q", cfg.AI.OllamaModel)
+	if cfg.AI.GeminiAPIKey != "gemini-key" || cfg.AI.GeminiModel != "gemini-test" || cfg.AI.GeminiBaseURL != "https://generativelanguage.googleapis.com/v1beta" {
+		t.Fatalf("unexpected Gemini config: %#v", cfg.AI)
+	}
+	if cfg.AI.OpenAIAPIType != "chat_completions" {
+		t.Fatalf("unexpected OpenAI API type: %q", cfg.AI.OpenAIAPIType)
 	}
 	if cfg.AI.ConfidenceCutoff != 0.62 {
 		t.Fatalf("unexpected cutoff: %f", cfg.AI.ConfidenceCutoff)
@@ -174,6 +183,43 @@ func TestLoadQualityFromEnv(t *testing.T) {
 	}
 	if cfg.Quality.AllowScore != 85 || cfg.Quality.ReviewScore != 70 || cfg.Quality.ChallengeScore != 45 || cfg.Quality.RateLimitScore != 25 {
 		t.Fatalf("unexpected quality thresholds: %#v", cfg.Quality)
+	}
+}
+
+func TestLoadPerformanceFromEnv(t *testing.T) {
+	t.Setenv("PERFORMANCE_ENABLED", "0")
+	t.Setenv("PERFORMANCE_INCLUDE_DEFAULT", "1")
+	t.Setenv("PERFORMANCE_THIRD_PARTY_DEFAULT", "0")
+
+	cfg := Load()
+	if cfg.Performance.Enabled {
+		t.Fatal("expected performance metrics to be disabled from env")
+	}
+	if !cfg.Performance.IncludeDefault {
+		t.Fatal("expected performance include_default from env")
+	}
+	if cfg.Performance.ThirdPartyDefault {
+		t.Fatal("expected third-party timing default to be disabled from env")
+	}
+}
+
+func TestLoadPerformanceFromYAML(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`
+performance:
+  enabled: true
+  include_default: true
+  third_party_default: false
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Performance.Enabled || !cfg.Performance.IncludeDefault || cfg.Performance.ThirdPartyDefault {
+		t.Fatalf("unexpected performance config: %#v", cfg.Performance)
 	}
 }
 
@@ -381,6 +427,7 @@ func TestLoadBGPAndAdminFromEnv(t *testing.T) {
 	t.Setenv("BGP_HISTORY_SNAPSHOTS", "9")
 	t.Setenv("BGP_REFRESH_HOURS", "4")
 	t.Setenv("BGP_MAX_PARALLEL_DOWNLOADS", "6")
+	t.Setenv("BGP_DOWNLOAD_TIMEOUT_SECONDS", "2700")
 	t.Setenv("BGP_MAX_PARALLEL_PARSE", "3")
 	t.Setenv("BGP_KEEP_RAW", "0")
 	t.Setenv("BGP_RAW_RETENTION_DAYS", "14")
@@ -399,7 +446,7 @@ func TestLoadBGPAndAdminFromEnv(t *testing.T) {
 	if !cfg.BGP.IncludeUpdates || cfg.BGP.HistorySnapshots != 9 || cfg.BGP.RefreshInterval != 4*time.Hour {
 		t.Fatalf("unexpected BGP update config: %#v", cfg.BGP)
 	}
-	if cfg.BGP.MaxParallelDownloads != 6 || cfg.BGP.MaxParallelParse != 3 || cfg.BGP.KeepRaw || cfg.BGP.RawRetentionDays != 14 {
+	if cfg.BGP.MaxParallelDownloads != 6 || cfg.BGP.DownloadTimeout != 2700*time.Second || cfg.BGP.MaxParallelParse != 3 || cfg.BGP.KeepRaw || cfg.BGP.RawRetentionDays != 14 {
 		t.Fatalf("unexpected BGP worker/raw config: %#v", cfg.BGP)
 	}
 	if cfg.BGP.SummaryFile != "data/generated/custom-bgp.jsonl.gz" || cfg.BGP.RouteViewsBaseURL != "https://routeviews.example.test" || cfg.BGP.RIPERISBaseURL != "https://ris.example.test" {
@@ -423,10 +470,18 @@ tls:
   cert_file: "certs/server.crt"
   key_file: "certs/server.key"
 ai:
-  provider: "ollama"
+  provider: "gemini"
   openai_api_key: "file-key"
-  ollama_model: "qwen3:14b"
-  ollama_base_url: "http://localhost:11434"
+  openai_model: "gpt-test"
+  openai_base_url: "https://openai.example.test/v1"
+  openai_api_type: "chat_completions"
+  anthropic_api_key: "anthropic-file-key"
+  anthropic_model: "claude-test"
+  anthropic_base_url: "https://anthropic.example.test"
+  anthropic_version: "2023-06-01"
+  gemini_api_key: "gemini-file-key"
+  gemini_model: "gemini-test"
+  gemini_base_url: "https://gemini.example.test/v1beta"
   confidence_cutoff: 0.66
   timeout_seconds: 11
 enrichment:
@@ -449,6 +504,7 @@ bgp:
   history_snapshots: 5
   refresh_hours: 6
   max_parallel_downloads: 8
+  download_timeout_seconds: 1800
   max_parallel_parse: 4
   keep_raw: false
   raw_retention_days: 10
@@ -511,7 +567,7 @@ sources:
 	if !cfg.TLS.Enabled || cfg.TLS.CertFile != "certs/server.crt" || cfg.TLS.KeyFile != "certs/server.key" {
 		t.Fatalf("unexpected tls config: %#v", cfg.TLS)
 	}
-	if cfg.AI.Provider != "ollama" || cfg.AI.OpenAIAPIKey != "file-key" || cfg.AI.OllamaModel != "qwen3:14b" || cfg.AI.ConfidenceCutoff != 0.66 || cfg.AI.Timeout != 11*time.Second {
+	if cfg.AI.Provider != "gemini" || cfg.AI.OpenAIAPIKey != "file-key" || cfg.AI.OpenAIModel != "gpt-test" || cfg.AI.OpenAIAPIType != "chat_completions" || cfg.AI.AnthropicAPIKey != "anthropic-file-key" || cfg.AI.AnthropicModel != "claude-test" || cfg.AI.GeminiAPIKey != "gemini-file-key" || cfg.AI.GeminiModel != "gemini-test" || cfg.AI.ConfidenceCutoff != 0.66 || cfg.AI.Timeout != 11*time.Second {
 		t.Fatalf("unexpected AI config: %#v", cfg.AI)
 	}
 	if cfg.Enrichment.TTL != 48*time.Hour || cfg.Enrichment.Timeout != 5*time.Second || cfg.Enrichment.AsyncOnMiss || cfg.Enrichment.ForegroundTimeout != 1200*time.Millisecond {
@@ -526,7 +582,7 @@ sources:
 	if !cfg.BGP.IncludeUpdates || cfg.BGP.HistorySnapshots != 5 || cfg.BGP.RefreshInterval != 6*time.Hour || cfg.BGP.KeepRaw {
 		t.Fatalf("unexpected BGP update config: %#v", cfg.BGP)
 	}
-	if cfg.BGP.MaxParallelDownloads != 8 || cfg.BGP.MaxParallelParse != 4 || cfg.BGP.RawRetentionDays != 10 || cfg.BGP.SummaryFile != "data/generated/full-bgp.jsonl.gz" {
+	if cfg.BGP.MaxParallelDownloads != 8 || cfg.BGP.DownloadTimeout != 1800*time.Second || cfg.BGP.MaxParallelParse != 4 || cfg.BGP.RawRetentionDays != 10 || cfg.BGP.SummaryFile != "data/generated/full-bgp.jsonl.gz" {
 		t.Fatalf("unexpected BGP worker config: %#v", cfg.BGP)
 	}
 	if !cfg.Admin.Enabled || cfg.Admin.Path != "/admin" || cfg.Admin.Token != "file-token" || cfg.Admin.LocalOnly {
@@ -596,6 +652,7 @@ func TestSaveToFileRoundTripsBGPAndAdminConfig(t *testing.T) {
 	cfg.BGP.Collectors = []string{"rrc00", "route-views.sg"}
 	cfg.BGP.IncludeUpdates = true
 	cfg.BGP.RefreshInterval = 6 * time.Hour
+	cfg.BGP.DownloadTimeout = 45 * time.Minute
 	cfg.BGP.KeepRaw = false
 	cfg.Admin.Path = "/settings"
 	cfg.Admin.Token = "secret"
@@ -611,7 +668,7 @@ func TestSaveToFileRoundTripsBGPAndAdminConfig(t *testing.T) {
 	if loaded.Addr != ":19091" || len(loaded.BGP.Collectors) != 2 || loaded.BGP.Collectors[1] != "route-views.sg" {
 		t.Fatalf("unexpected loaded config: %#v", loaded)
 	}
-	if !loaded.BGP.IncludeUpdates || loaded.BGP.RefreshInterval != 6*time.Hour || loaded.BGP.KeepRaw {
+	if !loaded.BGP.IncludeUpdates || loaded.BGP.RefreshInterval != 6*time.Hour || loaded.BGP.DownloadTimeout != 45*time.Minute || loaded.BGP.KeepRaw {
 		t.Fatalf("unexpected loaded BGP config: %#v", loaded.BGP)
 	}
 	if loaded.Admin.Path != "/settings" || loaded.Admin.Token != "secret" || loaded.Admin.LocalOnly {

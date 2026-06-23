@@ -17,13 +17,21 @@ import (
 	"strings"
 	"time"
 
+	"ipasn/internal/config"
 	"ipasn/internal/store"
 )
 
 type Manifest struct {
-	Version   string            `json:"version"`
-	UpdatedAt time.Time         `json:"updated_at"`
-	RawFiles  map[string]string `json:"raw_files"`
+	Version       string            `json:"version"`
+	UpdatedAt     time.Time         `json:"updated_at"`
+	RawFiles      map[string]string `json:"raw_files"`
+	DownloadStats DownloadStats     `json:"download_stats,omitempty"`
+}
+
+type snapshotOptions struct {
+	bgpObservationFiles []string
+	bgpIndexFile        string
+	bgpIndexMode        string
 }
 
 func LatestCAIDAPathFromCreationLog(r io.Reader) (string, error) {
@@ -309,7 +317,22 @@ func ParseBGPObservationLine(line string) (store.BGPObservationRecord, bool) {
 	return record, true
 }
 
+func BuildSnapshot(cfg config.Config) (*store.Snapshot, error) {
+	options := snapshotOptions{
+		bgpIndexFile: resolveDataPath(cfg.DataDir, cfg.BGP.IndexFile),
+		bgpIndexMode: cfg.BGP.IndexMode,
+	}
+	if strings.TrimSpace(cfg.BGP.SummaryFile) != "" {
+		options.bgpObservationFiles = append(options.bgpObservationFiles, resolveDataPath(cfg.DataDir, cfg.BGP.SummaryFile))
+	}
+	return buildSnapshotFromRaw(cfg.DataDir, options)
+}
+
 func BuildSnapshotFromRaw(dataDir string) (*store.Snapshot, error) {
+	return buildSnapshotFromRaw(dataDir, snapshotOptions{})
+}
+
+func buildSnapshotFromRaw(dataDir string, options snapshotOptions) (*store.Snapshot, error) {
 	rawDir := filepath.Join(dataDir, "raw")
 	prefixes := store.NewPrefixIndex()
 	allocations := store.NewAllocationIndex()
@@ -363,10 +386,11 @@ func BuildSnapshotFromRaw(dataDir string) (*store.Snapshot, error) {
 	if prefixes.Count() == 0 {
 		return nil, fmt.Errorf("no prefix records loaded from %s", rawDir)
 	}
+	prefixes.Finalize()
 	if err := parseCAIDAHistory(rawDir, history, rawFiles); err != nil {
 		return nil, err
 	}
-	if err := parseReliabilityFiles(rawDir, reliability, rawFiles); err != nil {
+	if err := parseReliabilityFiles(rawDir, reliability, rawFiles, options); err != nil {
 		return nil, err
 	}
 
@@ -408,13 +432,14 @@ func parseCAIDAHistory(rawDir string, history *store.HistoryIndex, rawFiles map[
 	matches, _ := filepath.Glob(filepath.Join(rawDir, "history", "caida-ipv*.pfx2as.gz"))
 	sort.Strings(matches)
 	for _, path := range matches {
-		prefixes := store.NewPrefixIndex()
+		prefixes := store.NewLookupOnlyPrefixIndex()
 		if err := parseCAIDAFile(path, prefixes); err != nil {
 			return err
 		}
 		if prefixes.Count() == 0 {
 			continue
 		}
+		prefixes.Finalize()
 		label := historyLabel(path)
 		history.AddSnapshot(label, prefixes)
 		rawFiles["caida_history_"+sanitizeKey(label)] = path
@@ -422,7 +447,7 @@ func parseCAIDAHistory(rawDir string, history *store.HistoryIndex, rawFiles map[
 	return nil
 }
 
-func parseReliabilityFiles(rawDir string, reliability *store.ReliabilityIndex, rawFiles map[string]string) error {
+func parseReliabilityFiles(rawDir string, reliability *store.ReliabilityIndex, rawFiles map[string]string, options snapshotOptions) error {
 	dirs := []string{rawDir, filepath.Join(filepath.Dir(rawDir), "generated")}
 	for _, path := range reliabilityMatches(rawDir, "rpki-vrps*") {
 		rawFiles["rpki_"+sanitizeKey(filepath.Base(path))] = path
@@ -436,18 +461,58 @@ func parseReliabilityFiles(rawDir string, reliability *store.ReliabilityIndex, r
 			return err
 		}
 	}
-	for _, dir := range dirs {
-		for _, path := range reliabilityMatches(dir, "bgp-observations*") {
-			rawFiles["bgp_observation_"+sanitizeKey(filepath.Base(path))] = path
+	reliability.RPKI.Finalize()
+	reliability.IRR.Finalize()
+	loadedBGPIndex := false
+	if shouldLoadCompiledBGPIndex(options.bgpIndexMode, options.bgpIndexFile) {
+		if info, err := os.Stat(options.bgpIndexFile); err == nil && !info.IsDir() && info.Size() > 0 {
+			index, err := store.LoadBGPObservationIndex(options.bgpIndexFile)
+			if err != nil {
+				return fmt.Errorf("load BGP compact index %s: %w", options.bgpIndexFile, err)
+			}
+			reliability.BGP = index
+			rawFiles["bgp_observation_index_"+sanitizeKey(filepath.Base(options.bgpIndexFile))] = options.bgpIndexFile
+			loadedBGPIndex = true
+		}
+	}
+	if !loadedBGPIndex {
+		for _, dir := range dirs {
+			for _, path := range reliabilityMatches(dir, "bgp-observations*") {
+				rawFiles["bgp_observation_"+sanitizeKey(filepath.Base(path))] = path
+				if err := parseBGPObservationFile(path, reliability.BGP); err != nil {
+					return err
+				}
+			}
+		}
+		for _, path := range options.bgpObservationFiles {
+			path = strings.TrimSpace(path)
+			if path == "" {
+				continue
+			}
+			info, err := os.Stat(path)
+			if err != nil || info.IsDir() {
+				continue
+			}
+			key := "bgp_observation_" + sanitizeKey(filepath.Base(path))
+			if _, exists := rawFiles[key]; exists {
+				continue
+			}
+			rawFiles[key] = path
 			if err := parseBGPObservationFile(path, reliability.BGP); err != nil {
 				return err
 			}
 		}
+		reliability.BGP.Finalize()
 	}
 	for _, path := range reliabilityMatches(rawDir, "geofeed*") {
 		rawFiles["geofeed_"+sanitizeKey(filepath.Base(path))] = path
 	}
 	return nil
+}
+
+func shouldLoadCompiledBGPIndex(mode, path string) bool {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	return strings.TrimSpace(path) != "" && mode != "jsonl" && mode != "off"
 }
 
 func reliabilityMatches(rawDir, pattern string) []string {
@@ -514,6 +579,22 @@ func parseBGPObservationFile(path string, idx *store.BGPObservationIndex) error 
 		}
 	}
 	return scanner.Err()
+}
+
+func CompileBGPObservationIndex(summaryPath, indexPath string) (int, error) {
+	summaryPath = strings.TrimSpace(summaryPath)
+	indexPath = strings.TrimSpace(indexPath)
+	if summaryPath == "" || indexPath == "" {
+		return 0, nil
+	}
+	idx := store.NewBGPObservationIndex()
+	if err := parseBGPObservationFile(summaryPath, idx); err != nil {
+		return 0, err
+	}
+	if err := store.SaveBGPObservationIndex(indexPath, idx); err != nil {
+		return 0, err
+	}
+	return idx.Count(), nil
 }
 
 func openMaybeGzip(path string) (io.Reader, func(), error) {

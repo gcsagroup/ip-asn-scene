@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"ipasn/internal/perf"
 	"ipasn/internal/store"
 )
 
@@ -279,6 +280,60 @@ func TestClientEnrichesOnlineSourcesConcurrently(t *testing.T) {
 	}
 	if elapsed >= 320*time.Millisecond {
 		t.Fatalf("expected online enrichment to run concurrently, took %s", elapsed)
+	}
+}
+
+func TestClientRecordsThirdPartyTimings(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ripestat/prefix-overview":
+			_, _ = w.Write([]byte(`{"status":"ok","data":{"announced":true,"asns":[{"asn":15169}],"resource":"8.8.8.0/24","query_time":"2026-05-20T08:00:00"}}`))
+		case "/ripestat/looking-glass":
+			_, _ = w.Write([]byte(`{"status":"ok","data":{"rrcs":[{"rrc":"RRC01","location":"London, United Kingdom","peers":[{"asn_origin":"15169","as_path":"2914 15169","prefix":"8.8.8.0/24","peer":"192.0.2.1"}]}]}}`))
+		case "/rdap/ip/8.8.8.8":
+			_, _ = w.Write([]byte(`{"name":"GOGL","country":"US","remarks":[{"description":["Google LLC"]}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{
+		CacheDir:           t.TempDir(),
+		TTL:                time.Hour,
+		Timeout:            2 * time.Second,
+		RIPEStatPrefixURL:  server.URL + "/ripestat/prefix-overview?resource={ip}",
+		RIPEStatBGPPathURL: server.URL + "/ripestat/looking-glass?resource={prefix}",
+		RDAPURLTemplate:    server.URL + "/rdap/ip/{ip}",
+		TeamCymruTXTLookup: func(ctx context.Context, ip string) ([]string, error) {
+			return []string{"15169 | 8.8.8.0/24 | US | arin | 1992-12-01 | GOOGLE - Google LLC"}, nil
+		},
+		WhoisLookup: func(ctx context.Context, registry, ip string) (string, error) {
+			return "netname: GOGL\ndescr: Google LLC\ncountry: US\nsource: ARIN", nil
+		},
+	})
+
+	recorder := perf.NewRecorder()
+	ctx := perf.WithRecorder(context.Background(), recorder)
+	_, err := client.EnrichIPWithOptions(ctx, "8.8.8.8", store.AllocationRecord{Prefix: "8.8.8.0/24", Country: "US", Registry: "arin", Source: "rir:arin"}, RequestOptions{Mode: ModeWait})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := recorder.Finish(true)
+	names := map[string]bool{}
+	for _, item := range report.ThirdParty {
+		names[item.Name] = true
+		if item.DurationMS < 0 {
+			t.Fatalf("expected non-negative third-party duration: %#v", item)
+		}
+		if item.URL == "" {
+			t.Fatalf("expected third-party URL: %#v", item)
+		}
+	}
+	for _, expected := range []string{"team_cymru", "ripestat_prefix", "rdap", "whois", "ripe_ris_looking_glass"} {
+		if !names[expected] {
+			t.Fatalf("expected timing for %s, got %#v", expected, report.ThirdParty)
+		}
 	}
 }
 

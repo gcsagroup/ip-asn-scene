@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,6 +25,19 @@ import (
 	"ipasn/internal/config"
 	"ipasn/internal/store"
 )
+
+const bgpDownloadMaxAttempts = 4
+
+var bgpDownloadRetryDelay = 2 * time.Second
+
+type bgpRefreshState struct {
+	Version       int       `json:"version"`
+	SummaryFile   string    `json:"summary_file"`
+	LastSuccessAt time.Time `json:"last_success_at,omitempty"`
+	LastErrorAt   time.Time `json:"last_error_at,omitempty"`
+	LastError     string    `json:"last_error,omitempty"`
+	SourceCount   int       `json:"source_count,omitempty"`
+}
 
 type BGPRIBSource struct {
 	Source    string `json:"source"`
@@ -46,17 +60,27 @@ func RefreshFullBGP(ctx context.Context, cfg config.Config, client *http.Client)
 	if client == nil {
 		client = http.DefaultClient
 	}
+	if skip, _ := shouldSkipFreshBGPSummary(cfg, time.Now()); skip {
+		if err := ensureBGPCompactIndex(cfg); err != nil {
+			recordBGPRefreshError(cfg, err)
+			return 0, err
+		}
+		return 0, nil
+	}
 	sources, err := DiscoverBGPRIBSources(ctx, client, cfg.BGP)
 	if err != nil {
+		recordBGPRefreshError(cfg, err)
 		return 0, err
 	}
 	rawDir := filepath.Join(cfg.DataDir, "raw", "bgp")
-	downloaded, err := downloadBGPSources(ctx, client, rawDir, sources, cfg.BGP.MaxParallelDownloads)
+	downloaded, err := downloadBGPSources(ctx, client, rawDir, sources, cfg.BGP.MaxParallelDownloads, cfg.BGP.DownloadTimeout)
 	if err != nil {
+		recordBGPRefreshError(cfg, err)
 		return 0, err
 	}
 	aggregator, err := parseBGPSources(ctx, downloaded, cfg.BGP.MaxParallelParse)
 	if err != nil {
+		recordBGPRefreshError(cfg, err)
 		return 0, err
 	}
 	if !cfg.BGP.KeepRaw {
@@ -64,11 +88,136 @@ func RefreshFullBGP(ctx context.Context, cfg config.Config, client *http.Client)
 			_ = os.Remove(item.Path)
 		}
 	}
-	if err := writeBGPRecords(resolveDataPath(cfg.DataDir, cfg.BGP.SummaryFile), aggregator.records()); err != nil {
+	summaryPath := resolveDataPath(cfg.DataDir, cfg.BGP.SummaryFile)
+	if err := writeBGPRecords(summaryPath, aggregator.records()); err != nil {
+		recordBGPRefreshError(cfg, err)
 		return 0, err
 	}
+	if err := ensureBGPCompactIndex(cfg); err != nil {
+		recordBGPRefreshError(cfg, err)
+		return 0, err
+	}
+	recordBGPRefreshSuccess(cfg, len(sources))
 	pruneBGPRawFiles(rawDir, cfg.BGP.RawRetentionDays)
 	return len(sources), nil
+}
+
+func ensureBGPCompactIndex(cfg config.Config) error {
+	if !bgpCompactIndexEnabled(cfg.BGP) {
+		return nil
+	}
+	summaryPath := resolveDataPath(cfg.DataDir, cfg.BGP.SummaryFile)
+	indexPath := resolveDataPath(cfg.DataDir, cfg.BGP.IndexFile)
+	if strings.TrimSpace(summaryPath) == "" || strings.TrimSpace(indexPath) == "" {
+		return nil
+	}
+	summaryInfo, err := os.Stat(summaryPath)
+	if err != nil || summaryInfo.IsDir() || summaryInfo.Size() == 0 {
+		return err
+	}
+	if indexInfo, err := os.Stat(indexPath); err == nil && !indexInfo.IsDir() && indexInfo.Size() > 0 && !indexInfo.ModTime().Before(summaryInfo.ModTime()) {
+		if version, err := store.BGPObservationIndexVersion(indexPath); err == nil && version >= 2 {
+			return nil
+		}
+	}
+	_, err = CompileBGPObservationIndex(summaryPath, indexPath)
+	return err
+}
+
+func bgpCompactIndexEnabled(cfg config.BGPConfig) bool {
+	mode := strings.ToLower(strings.TrimSpace(cfg.IndexMode))
+	return mode != "" && mode != "jsonl" && mode != "off"
+}
+
+func shouldSkipFreshBGPSummary(cfg config.Config, now time.Time) (bool, string) {
+	if !cfg.BGP.Enabled || strings.ToLower(strings.TrimSpace(cfg.BGP.Mode)) != "full" {
+		return false, ""
+	}
+	interval := cfg.BGP.RefreshInterval
+	if interval <= 0 {
+		interval = 8 * time.Hour
+	}
+	summaryPath := resolveDataPath(cfg.DataDir, cfg.BGP.SummaryFile)
+	info, err := os.Stat(summaryPath)
+	if err != nil || info.IsDir() || info.Size() == 0 {
+		return false, ""
+	}
+
+	state := loadBGPRefreshState(cfg.DataDir)
+	if state.LastErrorAt.After(state.LastSuccessAt) {
+		return false, ""
+	}
+	reference := state.LastSuccessAt
+	if reference.IsZero() || state.SummaryFile != summaryPath {
+		reference = info.ModTime()
+	}
+	if reference.IsZero() {
+		return false, ""
+	}
+	elapsed := now.Sub(reference)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	if elapsed >= interval {
+		return false, ""
+	}
+	remaining := interval - elapsed
+	return true, fmt.Sprintf("BGP 汇总在 %s 前已成功更新，剩余 %s 后再刷新；失败状态会立即重试", elapsed.Round(time.Second), remaining.Round(time.Second))
+}
+
+func recordBGPRefreshSuccess(cfg config.Config, sourceCount int) {
+	summaryPath := resolveDataPath(cfg.DataDir, cfg.BGP.SummaryFile)
+	state := loadBGPRefreshState(cfg.DataDir)
+	state.Version = 1
+	state.SummaryFile = summaryPath
+	state.LastSuccessAt = time.Now().UTC()
+	state.LastError = ""
+	state.SourceCount = sourceCount
+	_ = saveBGPRefreshState(cfg.DataDir, state)
+}
+
+func recordBGPRefreshError(cfg config.Config, err error) {
+	if err == nil {
+		return
+	}
+	summaryPath := resolveDataPath(cfg.DataDir, cfg.BGP.SummaryFile)
+	state := loadBGPRefreshState(cfg.DataDir)
+	state.Version = 1
+	state.SummaryFile = summaryPath
+	state.LastErrorAt = time.Now().UTC()
+	state.LastError = err.Error()
+	_ = saveBGPRefreshState(cfg.DataDir, state)
+}
+
+func loadBGPRefreshState(dataDir string) bgpRefreshState {
+	body, err := os.ReadFile(bgpRefreshStatePath(dataDir))
+	if err != nil {
+		return bgpRefreshState{Version: 1}
+	}
+	var state bgpRefreshState
+	if err := json.Unmarshal(body, &state); err != nil {
+		return bgpRefreshState{Version: 1}
+	}
+	if state.Version == 0 {
+		state.Version = 1
+	}
+	return state
+}
+
+func saveBGPRefreshState(dataDir string, state bgpRefreshState) error {
+	state.Version = 1
+	body, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWrite(bgpRefreshStatePath(dataDir), body)
+}
+
+func bgpRefreshStatePath(dataDir string) string {
+	if strings.TrimSpace(dataDir) == "" {
+		dataDir = "data"
+	}
+	return filepath.Join(dataDir, "processed", "bgp-refresh-state.json")
 }
 
 type downloadedBGPRIB struct {
@@ -76,13 +225,14 @@ type downloadedBGPRIB struct {
 	Path   string
 }
 
-func downloadBGPSources(ctx context.Context, client *http.Client, rawDir string, sources []BGPRIBSource, workers int) ([]downloadedBGPRIB, error) {
+func downloadBGPSources(ctx context.Context, client *http.Client, rawDir string, sources []BGPRIBSource, workers int, downloadTimeout time.Duration) ([]downloadedBGPRIB, error) {
 	if workers <= 0 {
 		workers = 1
 	}
 	if workers > len(sources) && len(sources) > 0 {
 		workers = len(sources)
 	}
+	downloadClient := bgpDownloadClient(client, downloadTimeout)
 	jobs := make(chan BGPRIBSource)
 	out := []downloadedBGPRIB{}
 	var mu sync.Mutex
@@ -107,7 +257,7 @@ func downloadBGPSources(ctx context.Context, client *http.Client, rawDir string,
 			defer wg.Done()
 			for source := range jobs {
 				localPath := bgpRawPath(rawDir, source)
-				if err := downloadBGPFile(ctx, client, source.URL, localPath); err != nil {
+				if err := downloadBGPFile(ctx, downloadClient, source.URL, localPath); err != nil {
 					setErr(err)
 					continue
 				}
@@ -137,6 +287,18 @@ feedDownloads:
 		return out[i].Source.Source < out[j].Source.Source
 	})
 	return out, nil
+}
+
+func bgpDownloadClient(base *http.Client, timeout time.Duration) *http.Client {
+	if base == nil {
+		base = http.DefaultClient
+	}
+	if timeout <= 0 {
+		return base
+	}
+	next := *base
+	next.Timeout = timeout
+	return &next
 }
 
 func parseBGPSources(ctx context.Context, downloaded []downloadedBGPRIB, workers int) (*bgpSummaryAggregator, error) {
@@ -203,7 +365,7 @@ func DiscoverBGPRIBSources(ctx context.Context, client *http.Client, cfg config.
 	out := []BGPRIBSource{}
 	months := bgpMonthCandidates(cfg.Month)
 	if cfg.RouteViewsEnabled {
-		collectors, err := discoverCollectors(ctx, client, cfg.RouteViewsBaseURL, cfg.Collectors, routeViewsCollector)
+		collectors, err := discoverCollectors(ctx, client, cfg.RouteViewsBaseURL, cfg.Collectors, routeViewsCollector, routeViewsCollectorFromHref, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -219,7 +381,7 @@ func DiscoverBGPRIBSources(ctx context.Context, client *http.Client, cfg config.
 		}
 	}
 	if cfg.RIPERISEnabled {
-		collectors, err := discoverCollectors(ctx, client, cfg.RIPERISBaseURL, cfg.Collectors, ripeRISCollector)
+		collectors, err := discoverCollectors(ctx, client, cfg.RIPERISBaseURL, cfg.Collectors, ripeRISCollector, ripeRISCollectorFromHref, defaultRIPERISCollectors())
 		if err != nil {
 			return nil, err
 		}
@@ -516,9 +678,30 @@ func downloadBGPFile(ctx context.Context, client *http.Client, sourceURL, destin
 	if info, err := os.Stat(destination); err == nil && info.Size() > 0 {
 		return nil
 	}
+	var lastErr error
+	for attempt := 1; attempt <= bgpDownloadMaxAttempts; attempt++ {
+		if err := downloadBGPFileOnce(ctx, client, sourceURL, destination); err != nil {
+			lastErr = err
+			if !isRetryableBGPDownloadError(ctx, err) || attempt == bgpDownloadMaxAttempts {
+				return err
+			}
+			if err := sleepBGPDownloadRetry(ctx, time.Duration(attempt)*bgpDownloadRetryDelay); err != nil {
+				return err
+			}
+			continue
+		}
+		return nil
+	}
+	return lastErr
+}
+
+func downloadBGPFileOnce(ctx context.Context, client *http.Client, sourceURL, destination string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sourceURL, nil)
 	if err != nil {
 		return err
+	}
+	if offset := partialBGPDownloadSize(destination); offset > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -526,27 +709,71 @@ func downloadBGPFile(ctx context.Context, client *http.Client, sourceURL, destin
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("download %s: HTTP %d", sourceURL, resp.StatusCode)
+		return bgpHTTPStatusError{URL: sourceURL, Code: resp.StatusCode}
 	}
 	if err := os.MkdirAll(filepath.Dir(destination), 0o775); err != nil {
 		return err
 	}
 	tmp := destination + ".tmp"
-	file, err := os.Create(tmp)
+	flags := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+	if req.Header.Get("Range") != "" && resp.StatusCode == http.StatusPartialContent {
+		flags = os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	}
+	file, err := os.OpenFile(tmp, flags, 0o664)
 	if err != nil {
 		return err
 	}
 	_, copyErr := io.Copy(file, resp.Body)
 	closeErr := file.Close()
 	if copyErr != nil {
-		_ = os.Remove(tmp)
-		return copyErr
+		return fmt.Errorf("download %s: %w", sourceURL, copyErr)
 	}
 	if closeErr != nil {
-		_ = os.Remove(tmp)
 		return closeErr
 	}
 	return os.Rename(tmp, destination)
+}
+
+type bgpHTTPStatusError struct {
+	URL  string
+	Code int
+}
+
+func (e bgpHTTPStatusError) Error() string {
+	return fmt.Sprintf("download %s: HTTP %d", e.URL, e.Code)
+}
+
+func partialBGPDownloadSize(destination string) int64 {
+	info, err := os.Stat(destination + ".tmp")
+	if err != nil || info.IsDir() {
+		return 0
+	}
+	return info.Size()
+}
+
+func isRetryableBGPDownloadError(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil {
+		return false
+	}
+	var statusErr bgpHTTPStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.Code == http.StatusRequestTimeout || statusErr.Code == http.StatusTooManyRequests || statusErr.Code >= 500
+	}
+	return true
+}
+
+func sleepBGPDownloadRetry(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func bgpRawPath(rawDir string, source BGPRIBSource) string {
@@ -608,7 +835,7 @@ func discoverLatestInMonths(ctx context.Context, client *http.Client, baseURL, c
 	return BGPRIBSource{}, false, nil
 }
 
-func discoverCollectors(ctx context.Context, client *http.Client, baseURL string, wanted []string, predicate func(string) bool) ([]string, error) {
+func discoverCollectors(ctx context.Context, client *http.Client, baseURL string, wanted []string, predicate func(string) bool, normalizeHref func(string) (string, bool), fallback []string) ([]string, error) {
 	if !wantsAllCollectors(wanted) {
 		out := []string{}
 		for _, collector := range wanted {
@@ -629,7 +856,11 @@ func discoverCollectors(ctx context.Context, client *http.Client, baseURL string
 	out := []string{}
 	seen := map[string]struct{}{}
 	for _, href := range hrefs {
-		collector := strings.Trim(strings.TrimSpace(href), "/")
+		collector, ok := normalizeHref(href)
+		if !ok {
+			continue
+		}
+		collector = strings.Trim(strings.TrimSpace(collector), "/")
 		if collector == "" || strings.HasPrefix(collector, ".") || !predicate(collector) {
 			continue
 		}
@@ -640,6 +871,9 @@ func discoverCollectors(ctx context.Context, client *http.Client, baseURL string
 		out = append(out, collector)
 	}
 	sort.Strings(out)
+	if len(out) == 0 && len(fallback) > 0 {
+		return append([]string(nil), fallback...), nil
+	}
 	return out, nil
 }
 
@@ -697,11 +931,64 @@ func latestMatchingHref(hrefs []string, match func(string) bool) string {
 }
 
 func routeViewsCollector(value string) bool {
-	return strings.HasPrefix(value, "route-views")
+	value = strings.Trim(strings.TrimSpace(value), "/")
+	return value != "" && !strings.Contains(value, "/")
 }
 
 func ripeRISCollector(value string) bool {
 	return strings.HasPrefix(value, "rrc")
+}
+
+func routeViewsCollectorFromHref(href string) (string, bool) {
+	parts := hrefPathParts(href)
+	for index, part := range parts {
+		if part == "bgpdata" && index > 0 {
+			return parts[index-1], true
+		}
+	}
+	if len(parts) == 1 && strings.HasPrefix(parts[0], "route-views") {
+		return parts[0], true
+	}
+	return "", false
+}
+
+func ripeRISCollectorFromHref(href string) (string, bool) {
+	for _, part := range hrefPathParts(href) {
+		if ripeRISCollector(part) {
+			return part, true
+		}
+	}
+	return "", false
+}
+
+func hrefPathParts(href string) []string {
+	href = strings.TrimSpace(strings.Split(href, "?")[0])
+	parsed, err := url.Parse(href)
+	rawPath := href
+	if err == nil && parsed.Path != "" {
+		rawPath = parsed.Path
+	}
+	rawPath = strings.Trim(rawPath, "/")
+	if rawPath == "" {
+		return nil
+	}
+	values := strings.Split(rawPath, "/")
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" && value != "." && value != ".." {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func defaultRIPERISCollectors() []string {
+	out := make([]string, 0, 27)
+	for i := 0; i <= 26; i++ {
+		out = append(out, fmt.Sprintf("rrc%02d", i))
+	}
+	return out
 }
 
 func routeViewsRIBPath(collector, month string) string {

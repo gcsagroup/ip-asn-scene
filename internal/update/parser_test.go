@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"ipasn/internal/config"
 	"ipasn/internal/store"
 )
 
@@ -184,6 +185,63 @@ func TestBuildSnapshotLoadsGeneratedBGPObservationSummary(t *testing.T) {
 	summary := snapshot.Reliability.BGP.Summarize("64.81.32.64", 3257)
 	if summary.Visibility != 2 || summary.DominantUpstreams[0].ASN != 1299 {
 		t.Fatalf("unexpected BGP summary: %#v", summary)
+	}
+}
+
+func TestBuildSnapshotLoadsConfiguredBGPSummaryFile(t *testing.T) {
+	dataDir := t.TempDir()
+	rawDir := filepath.Join(dataDir, "raw")
+	configuredSummary := filepath.Join(dataDir, "custom", "current-bgp.jsonl.gz")
+	writeGzipTestFile(t, filepath.Join(rawDir, "caida-ipv4.pfx2as.gz"), "203.0.114.0\t24\t64500\n")
+	if err := WriteBGPObservationSummary(configuredSummary, []BGPObservationInput{
+		{Prefix: "203.0.114.0/24", OriginASN: 64500, Source: "routeviews", Collector: "rv2", DominantUpstream: 1299},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.DataDir = dataDir
+	cfg.BGP.SummaryFile = configuredSummary
+	snapshot, err := BuildSnapshot(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Status.BGPObservationCount != 1 {
+		t.Fatalf("expected configured BGP summary file to be loaded, got status %#v", snapshot.Status)
+	}
+	summary := snapshot.Reliability.BGP.Summarize("203.0.114.10", 64500)
+	if summary.Visibility != 1 || len(summary.DominantUpstreams) != 1 || summary.DominantUpstreams[0].ASN != 1299 {
+		t.Fatalf("unexpected configured BGP summary: %#v", summary)
+	}
+}
+
+func TestBuildSnapshotPrefersCompiledBGPIndex(t *testing.T) {
+	dataDir := t.TempDir()
+	rawDir := filepath.Join(dataDir, "raw")
+	generatedDir := filepath.Join(dataDir, "generated")
+	writeGzipTestFile(t, filepath.Join(rawDir, "caida-ipv4.pfx2as.gz"), "203.0.114.0\t24\t64500\n")
+	writeTestFile(t, filepath.Join(generatedDir, "bgp-observations-full.jsonl"), `{"prefix":"203.0.114.0/24","origin_asn":64496,"source":"routeviews","collector":"routeviews:1","observation_count":1}`+"\n")
+
+	idx := store.NewBGPObservationIndex()
+	if err := idx.Add(store.BGPObservationRecord{Prefix: "203.0.114.0/24", OriginASN: 64500, Source: "ripe_ris", Collector: "ripe_ris:3", ObservationCount: 3, DominantUpstream: 1299}); err != nil {
+		t.Fatal(err)
+	}
+	indexPath := filepath.Join(generatedDir, "bgp-index.bin")
+	if err := store.SaveBGPObservationIndex(indexPath, idx); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.DataDir = dataDir
+	cfg.BGP.IndexFile = indexPath
+	cfg.BGP.IndexMode = "compact"
+	snapshot, err := BuildSnapshot(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := snapshot.Reliability.BGP.Summarize("203.0.114.10", 64500)
+	if summary.Visibility != 3 || len(summary.Origins) != 1 || summary.Origins[0].ASN != 64500 {
+		t.Fatalf("expected compiled index to win over JSONL fallback, got %#v", summary)
 	}
 }
 

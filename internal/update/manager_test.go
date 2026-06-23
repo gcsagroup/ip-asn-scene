@@ -1,9 +1,12 @@
 package update
 
 import (
+	"context"
 	"testing"
 
 	"ipasn/internal/config"
+	"ipasn/internal/firewall"
+	"ipasn/internal/store"
 )
 
 func TestManagerProgressTracksSteps(t *testing.T) {
@@ -54,5 +57,34 @@ func TestManagerProgressRecordsFailure(t *testing.T) {
 	}
 	if status.UpdateProgress.Active || status.UpdateProgress.LastError != "download failed" || status.UpdateProgress.Steps[0].Status != "failed" {
 		t.Fatalf("expected failed progress: %#v", status.UpdateProgress)
+	}
+}
+
+func TestRefreshFirewallListsRunsOnlyWhenEnabled(t *testing.T) {
+	original := generateFirewallLists
+	defer func() { generateFirewallLists = original }()
+
+	calls := 0
+	generateFirewallLists = func(ctx context.Context, cfg config.Config, snapshot *store.Snapshot) (firewall.Summary, error) {
+		calls++
+		return firewall.Summary{Files: map[string]firewall.FileStats{"scene-IDC.cidr": {Count: 1}}}, nil
+	}
+
+	cfg := config.Default()
+	cfg.FirewallLists.Enabled = false
+	if _, err := refreshFirewallLists(context.Background(), cfg, store.EmptySnapshot()); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("expected disabled firewall list generation to be skipped, calls=%d", calls)
+	}
+
+	cfg.FirewallLists.Enabled = true
+	cfg.IP2Region.Enabled = true
+	if _, err := refreshFirewallLists(context.Background(), cfg, store.EmptySnapshot()); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected enabled firewall list generation to run once, calls=%d", calls)
 	}
 }

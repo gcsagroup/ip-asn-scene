@@ -52,18 +52,25 @@ ai:
   provider: "auto"
   openai_api_key: ""
   openai_model: "gpt-5.4-mini"
-  openai_base_url: "https://api.openai.com/v1/responses"
-  ollama_model: "qwen3:8b"
-  ollama_base_url: "http://localhost:11434"
+  openai_base_url: "https://api.openai.com/v1"
+  openai_api_type: "responses"
+  anthropic_api_key: ""
+  anthropic_model: "claude-sonnet-4-6"
+  anthropic_base_url: "https://api.anthropic.com"
+  anthropic_version: "2023-06-01"
+  gemini_api_key: ""
+  gemini_model: "gemini-2.5-flash"
+  gemini_base_url: "https://generativelanguage.googleapis.com/v1beta"
   confidence_cutoff: 0.7
   timeout_seconds: 8
   max_cache: 2048
 ```
 
-- `provider`：`auto`、`off`、`openai`、`ollama`。
+- `provider`：`auto`、`off`、`openai`、`anthropic`、`gemini`。
 - `confidence_cutoff`：低于这个置信度时才调用 AI。
-- `ollama_base_url`：Ollama 服务地址。
 - `openai_api_key`：OpenAI key，也可以继续用环境变量 `OPENAI_API_KEY`。
+- `openai_api_type`：`responses` 调用 `/v1/responses`；`chat_completions` 调用 `/v1/chat/completions`，适合 OpenAI 兼容服务。
+- `anthropic_api_key` / `gemini_api_key`：分别对应 Anthropic 和 Gemini key，也可以用环境变量配置。
 
 ## 在线增强和缓存
 
@@ -121,10 +128,13 @@ bgp:
   history_snapshots: 7
   refresh_hours: 8
   max_parallel_downloads: 4
+  download_timeout_seconds: 7200
   max_parallel_parse: 2
   keep_raw: true
   raw_retention_days: 30
   summary_file: "data/generated/bgp-observations-full.jsonl.gz"
+  index_mode: "compact"
+  index_file: "data/generated/bgp-index.bin"
   routeviews_base_url: "https://archive.routeviews.org/"
   ripe_ris_base_url: "https://data.ris.ripe.net/"
 ```
@@ -137,12 +147,19 @@ bgp:
 - `history_snapshots`：全量 BGP 摘要的历史快照保留数量预留项。
 - `refresh_hours`：建议与 RIPE RIS dump 周期一致或更长，默认 8 小时。
 - `max_parallel_downloads` / `max_parallel_parse`：后台下载和解析并发上限。
+- `download_timeout_seconds`：单个 RouteViews / RIPE RIS MRT RIB 大文件下载超时，默认 `7200` 秒。这个值只影响全量 BGP 原始 RIB 下载，不影响普通查询和在线增强超时。
 - `keep_raw`：是否保留下载后的 MRT 原始文件。
 - `raw_retention_days`：原始 BGP 文件保留天数。
-- `summary_file`：生成的 BGP 多观察点摘要。查询服务只加载这个汇总文件，不加载 MRT 原始文件。
+- `summary_file`：生成的 BGP 多观察点摘要，作为后台编译紧凑索引的中间文件，也可作为旧版 JSONL 兼容回退。
+- `index_mode`：BGP 查询索引模式，默认 `compact`。设为 `jsonl` 时跳过紧凑索引，直接加载 `summary_file`；设为 `off` 时不加载 BGP 多观察点摘要。
+- `index_file`：紧凑 BGP 查询索引文件。后台更新会在摘要生成或摘要已存在但索引缺失/过期时自动编译它，查询服务优先加载这个文件以降低启动解析成本和内存占用。
 - `routeviews_base_url` / `ripe_ris_base_url`：公开离线 RIB 源地址。
 
-全量 BGP 会明显增加后台更新时间和磁盘占用，但不会让普通查询实时访问公网。查询路径只读取 `summary_file` 生成的本地索引。
+全量 BGP 会明显增加后台更新时间和磁盘占用，但不会让普通查询实时访问公网。默认查询路径读取 `index_file` 紧凑索引；索引不存在且未禁用时，后台更新会从 `summary_file` 本地补齐，不需要重新下载 RIB。
+
+## 下载状态缓存
+
+后台更新会维护 `data/processed/download-state.json`，记录公开源 URL、`ETag`、`Last-Modified`、`SHA256`、本地缓存文件和下载时间。再次更新同一 URL 时会发送 `If-None-Match` / `If-Modified-Since`；源站返回 `304 Not Modified` 时直接复用本地文件，不再重复下载 body。没有提供 `ETag` / `Last-Modified` 的源，会在短时间内复用本地缓存，避免连续点击造成重复拉取。
 
 ## 配置管理后台
 
@@ -188,6 +205,21 @@ quality:
 - `allow_score`、`review_score`、`challenge_score`、`rate_limit_score`：建议动作阈值。低于 `rate_limit_score` 时建议 `block`。
 
 评分结果中的 `score` 为 0-100，越高越干净；`recommendation` 是策略建议，不会直接改变 `scene`。
+
+## 性能指标
+
+```yaml
+performance:
+  enabled: true
+  include_default: false
+  third_party_default: true
+```
+
+- `enabled`：是否允许 `/api/lookup` 输出性能指标。关闭后即使传 `include_performance=1` 也不会输出。
+- `include_default`：是否默认输出 `performance`。关闭时可通过 `include_performance=1` 按需返回。
+- `third_party_default`：是否默认输出 `performance.third_party`，包括 Team Cymru、RIPEstat、RDAP、WHOIS、RIPE RIS 等在线源的单独耗时。可用 `include_third_party_timing=0/1` 覆盖。
+
+建议生产环境保持 `include_default: false`，需要排查慢查询时再在前台勾选“性能”或传 API 参数。
 
 ## 动态规则
 
@@ -379,5 +411,5 @@ BGP 摘要 CSV 示例：
 ```bash
 ./ipasn -config config.yaml -addr :8080
 ./ipasn -config config.yaml -tls -tls-cert certs/server.crt -tls-key certs/server.key
-./ipasn -config config.yaml -ai-provider ollama -ollama-model qwen3:8b
+./ipasn -config config.yaml -ai-provider openai -openai-base-url http://127.0.0.1:8000/v1 -openai-api-type chat_completions
 ```

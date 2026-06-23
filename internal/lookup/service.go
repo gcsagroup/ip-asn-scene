@@ -16,6 +16,7 @@ import (
 	"ipasn/internal/classify"
 	"ipasn/internal/enrich"
 	"ipasn/internal/geo"
+	"ipasn/internal/perf"
 	"ipasn/internal/quality"
 	"ipasn/internal/store"
 )
@@ -95,6 +96,7 @@ type Result struct {
 	Location           *geo.Location                  `json:"location,omitempty"`
 	AI                 *AIInfo                        `json:"ai,omitempty"`
 	Quality            *quality.Result                `json:"ip_quality,omitempty"`
+	Performance        *perf.Report                   `json:"performance,omitempty"`
 	DB                 store.Status                   `json:"db"`
 	Error              string                         `json:"error,omitempty"`
 	Extra              map[string]string              `json:"extra,omitempty"`
@@ -126,6 +128,7 @@ type staticProvider struct {
 
 type Service struct {
 	provider           SnapshotProvider
+	runtimeMu          sync.RWMutex
 	aiAdvisor          ai.Advisor
 	enricher           Enricher
 	geoLocator         geo.Locator
@@ -166,9 +169,11 @@ type Options struct {
 }
 
 type LookupOptions struct {
-	IncludeLocation  bool
-	IncludeQuality   bool
-	OnlineEnrichment OnlineEnrichmentMode
+	IncludeLocation       bool
+	IncludeQuality        bool
+	IncludePerformance    bool
+	PerformanceThirdParty bool
+	OnlineEnrichment      OnlineEnrichmentMode
 }
 
 type OnlineEnrichmentMode string
@@ -205,6 +210,16 @@ func NewServiceFromProviderWithOptions(provider SnapshotProvider, options Option
 	return &Service{provider: provider, aiAdvisor: options.AIAdvisor, enricher: options.Enricher, geoLocator: options.GeoLocator, aiConfidenceCutoff: cutoff, qualityConfig: qualityConfig}
 }
 
+func (s *Service) SetAIAdvisor(advisor ai.Advisor, confidenceCutoff float64) {
+	if confidenceCutoff <= 0 {
+		confidenceCutoff = 0.7
+	}
+	s.runtimeMu.Lock()
+	s.aiAdvisor = advisor
+	s.aiConfidenceCutoff = confidenceCutoff
+	s.runtimeMu.Unlock()
+}
+
 func (p *staticProvider) Snapshot() *store.Snapshot {
 	return p.snapshot.Load()
 }
@@ -218,6 +233,21 @@ func (s *Service) LookupContext(ctx context.Context, query string) Result {
 }
 
 func (s *Service) LookupWithOptions(ctx context.Context, query string, options LookupOptions) Result {
+	if !options.IncludePerformance {
+		return s.lookupWithOptions(ctx, query, options)
+	}
+	recorder := perf.FromContext(ctx)
+	if recorder == nil {
+		recorder = perf.NewRecorder()
+		ctx = perf.WithRecorder(ctx, recorder)
+	}
+	result := s.lookupWithOptions(ctx, query, options)
+	report := recorder.Finish(options.PerformanceThirdParty)
+	result.Performance = &report
+	return result
+}
+
+func (s *Service) lookupWithOptions(ctx context.Context, query string, options LookupOptions) Result {
 	query = strings.TrimSpace(query)
 	snapshot := s.provider.Snapshot()
 	if snapshot == nil {
@@ -241,8 +271,18 @@ func (s *Service) LookupWithOptions(ctx context.Context, query string, options L
 }
 
 func (s *Service) lookupIP(ctx context.Context, snapshot *store.Snapshot, query string, addr netip.Addr, options LookupOptions) Result {
+	localStart := time.Now()
+	localRecorded := false
+	recordLocal := func() {
+		if !localRecorded {
+			perf.AddPhase(ctx, "local_offline", time.Since(localStart))
+			localRecorded = true
+		}
+	}
+
 	classification := classify.Classify(classify.Input{IP: addr})
 	if classification.Scene == "BOGON" {
+		recordLocal()
 		result := Result{
 			OK:            true,
 			Query:         query,
@@ -255,7 +295,7 @@ func (s *Service) lookupIP(ctx context.Context, snapshot *store.Snapshot, query 
 			Evidence:      classification.Evidence,
 			DB:            snapshot.Status,
 		}
-		s.attachQuality(&result, options)
+		s.attachQuality(ctx, &result, options)
 		return result
 	}
 
@@ -312,7 +352,11 @@ func (s *Service) lookupIP(ctx context.Context, snapshot *store.Snapshot, query 
 	}
 
 	if s.enricher != nil && options.OnlineEnrichment != OnlineEnrichmentOff {
+		recordLocal()
+		onlineStart := time.Now()
 		enriched, err := s.enrichIP(ctx, addr.String(), allocation, options)
+		perf.AddPhase(ctx, "online_enrichment", time.Since(onlineStart))
+		perf.SetOnlineState(ctx, enriched.CacheHit, enriched.RefreshQueued, enriched.RefreshInProgress)
 		if err == nil {
 			registration = &enriched
 			netName = enriched.NetName
@@ -323,7 +367,9 @@ func (s *Service) lookupIP(ctx context.Context, snapshot *store.Snapshot, query 
 			evidence = append(evidence, "多源增强失败："+err.Error())
 		}
 	}
+	recordLocal()
 
+	aiStart := time.Now()
 	classification, aiInfo := s.maybeUseAI(ctx, ai.AdviceInput{
 		Query:          query,
 		QueryType:      "ip",
@@ -341,6 +387,7 @@ func (s *Service) lookupIP(ctx context.Context, snapshot *store.Snapshot, query 
 		RuleConfidence: classification.Confidence,
 		RuleEvidence:   evidence,
 	}, classification, &evidence)
+	perf.AddPhase(ctx, "ai", time.Since(aiStart))
 	inferredScene, inferredSceneName, inferredConfidence, inferredSource := inferredUsage(classification, registration, aiInfo)
 
 	result := Result{
@@ -382,16 +429,27 @@ func (s *Service) lookupIP(ctx context.Context, snapshot *store.Snapshot, query 
 	attachRoutingReliability(snapshot, &result)
 	attachSourceVotes(&result)
 	attachDataQuality(&result)
-	s.attachQuality(&result, options)
+	s.attachQuality(ctx, &result, options)
 	return result
 }
 
 func (s *Service) lookupAllocationFallback(ctx context.Context, snapshot *store.Snapshot, query string, addr netip.Addr, classification classify.Result, options LookupOptions) Result {
+	localStart := time.Now()
+	localRecorded := false
+	recordLocal := func() {
+		if !localRecorded {
+			perf.AddPhase(ctx, "local_offline", time.Since(localStart))
+			localRecorded = true
+		}
+	}
+
 	if snapshot.Allocations == nil {
+		recordLocal()
 		return Result{OK: false, Query: query, QueryType: "ip", IP: addr.String(), DB: snapshot.Status, Error: "no ASN found for IP"}
 	}
 	allocation, ok := snapshot.Allocations.Lookup(addr)
 	if !ok {
+		recordLocal()
 		return Result{OK: false, Query: query, QueryType: "ip", IP: addr.String(), DB: snapshot.Status, Error: "no ASN found for IP"}
 	}
 	evidence := []string{
@@ -434,7 +492,11 @@ func (s *Service) lookupAllocationFallback(ctx context.Context, snapshot *store.
 	}
 
 	if s.enricher != nil && options.OnlineEnrichment != OnlineEnrichmentOff {
+		recordLocal()
+		onlineStart := time.Now()
 		enriched, err := s.enrichIP(ctx, addr.String(), allocation, options)
+		perf.AddPhase(ctx, "online_enrichment", time.Since(onlineStart))
+		perf.SetOnlineState(ctx, enriched.CacheHit, enriched.RefreshQueued, enriched.RefreshInProgress)
 		if err == nil {
 			registration = &enriched
 			if enriched.PrimaryScene != "" && !ruleSceneApplied {
@@ -455,6 +517,7 @@ func (s *Service) lookupAllocationFallback(ctx context.Context, snapshot *store.
 			evidence = append(evidence, "多源增强失败："+err.Error())
 		}
 	}
+	recordLocal()
 
 	result := Result{
 		OK:                 true,
@@ -493,15 +556,17 @@ func (s *Service) lookupAllocationFallback(ctx context.Context, snapshot *store.
 	attachRoutingReliability(snapshot, &result)
 	attachSourceVotes(&result)
 	attachDataQuality(&result)
-	s.attachQuality(&result, options)
+	s.attachQuality(ctx, &result, options)
 	return result
 }
 
-func (s *Service) attachQuality(result *Result, options LookupOptions) {
+func (s *Service) attachQuality(ctx context.Context, result *Result, options LookupOptions) {
 	if result == nil || !result.OK || !options.IncludeQuality || !s.qualityConfig.Enabled {
 		return
 	}
+	start := time.Now()
 	qualityResult := quality.Evaluate(qualityInputFromResult(result), s.qualityConfig)
+	perf.AddPhase(ctx, "quality", time.Since(start))
 	result.Quality = &qualityResult
 }
 
@@ -552,6 +617,10 @@ func (s *Service) attachLocation(ctx context.Context, result *Result, addr netip
 	if !options.IncludeLocation || s.geoLocator == nil || !addr.IsValid() {
 		return
 	}
+	start := time.Now()
+	defer func() {
+		perf.AddPhase(ctx, "location", time.Since(start))
+	}()
 	location, ok := s.geoLocator.Lookup(ctx, addr.String())
 	if !ok {
 		return
@@ -1547,6 +1616,7 @@ func inferredUsage(classification classify.Result, registration *enrich.Result, 
 }
 
 func (s *Service) lookupASN(ctx context.Context, snapshot *store.Snapshot, query string, asn int, options LookupOptions) Result {
+	localStart := time.Now()
 	profile, ok := snapshot.ASNs.Lookup(asn)
 	if !ok {
 		profile = store.ASNProfile{ASN: asn}
@@ -1561,8 +1631,11 @@ func (s *Service) lookupASN(ctx context.Context, snapshot *store.Snapshot, query
 	classification := classify.Classify(classify.Input{Profile: profile})
 	evidence := append([]string{fmt.Sprintf("ASN 查询 AS%d", asn)}, classification.Evidence...)
 	if !ok && len(prefixes) == 0 {
+		perf.AddPhase(ctx, "local_offline", time.Since(localStart))
 		return Result{OK: false, Query: query, QueryType: "asn", ASN: asn, DB: snapshot.Status, Error: "no information found for ASN"}
 	}
+	perf.AddPhase(ctx, "local_offline", time.Since(localStart))
+	aiStart := time.Now()
 	classification, aiInfo := s.maybeUseAI(ctx, ai.AdviceInput{
 		Query:          query,
 		QueryType:      "asn",
@@ -1577,6 +1650,7 @@ func (s *Service) lookupASN(ctx context.Context, snapshot *store.Snapshot, query
 		RuleConfidence: classification.Confidence,
 		RuleEvidence:   evidence,
 	}, classification, &evidence)
+	perf.AddPhase(ctx, "ai", time.Since(aiStart))
 
 	result := Result{
 		OK:            true,
@@ -1596,16 +1670,20 @@ func (s *Service) lookupASN(ctx context.Context, snapshot *store.Snapshot, query
 		AI:            aiInfo,
 		DB:            snapshot.Status,
 	}
-	s.attachQuality(&result, options)
+	s.attachQuality(ctx, &result, options)
 	return result
 }
 
 func (s *Service) maybeUseAI(ctx context.Context, input ai.AdviceInput, classification classify.Result, evidence *[]string) (classify.Result, *AIInfo) {
-	if s.aiAdvisor == nil || classification.Confidence >= s.aiConfidenceCutoff {
+	s.runtimeMu.RLock()
+	advisor := s.aiAdvisor
+	cutoff := s.aiConfidenceCutoff
+	s.runtimeMu.RUnlock()
+	if advisor == nil || classification.Confidence >= cutoff {
 		return classification, nil
 	}
 
-	decision, err := s.aiAdvisor.Advise(ctx, input)
+	decision, err := advisor.Advise(ctx, input)
 	if err != nil {
 		return classification, &AIInfo{Used: false, Error: err.Error()}
 	}

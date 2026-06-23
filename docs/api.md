@@ -21,6 +21,8 @@ GET /api/lookup
 | `query` | 是 | IP 或 ASN，例如 `8.8.8.8`、`223.119.20.239`、`AS15169`。 |
 | `include_location` | 否 | `1`、`true`、`yes`、`on` 表示返回 IP 所在地。默认由 `ip2region.include_default` 决定。 |
 | `include_quality` | 否 | `1`、`true`、`yes`、`on` 表示返回 IP 质量 / 纯净度评分。默认由 `quality.include_default` 决定。 |
+| `include_performance` | 否 | `1`、`true`、`yes`、`on` 表示返回本次查询性能指标。默认由 `performance.include_default` 决定。 |
+| `include_third_party_timing` | 否 | `1` 表示在 `performance.third_party` 里返回第三方源耗时；`0` 表示隐藏第三方明细。默认由 `performance.third_party_default` 决定。 |
 | `online_enrichment` | 否 | 在线增强模式：`fast`、`wait`、`off`。默认 `fast`。 |
 
 ### online_enrichment
@@ -63,6 +65,12 @@ curl "http://127.0.0.1:18080/api/lookup?query=223.119.20.239&online_enrichment=o
 curl "http://127.0.0.1:18080/api/lookup?query=1.2.3.4&include_quality=1"
 ```
 
+返回性能指标并等待在线增强：
+
+```bash
+curl "http://127.0.0.1:18080/api/lookup?query=8.8.8.8&include_performance=1&include_third_party_timing=1&online_enrichment=wait"
+```
+
 查询 ASN：
 
 ```bash
@@ -93,6 +101,7 @@ curl "http://127.0.0.1:18080/api/lookup?query=AS15169"
 | `routing_security` | RPKI / IRR / BGP 多源路由可靠性分析。 |
 | `data_quality` | 综合数据质量评分。 |
 | `ip_quality` | IP 质量 / 纯净度评分，需启用默认输出或传 `include_quality=1`。 |
+| `performance` | 查询性能指标，需启用默认输出或传 `include_performance=1`。 |
 | `source_votes` | 场景判断的多源投票。 |
 | `warnings` | 路由、地理或来源冲突提示。 |
 | `location` | IP 所在地，需启用或传 `include_location=1`。 |
@@ -101,6 +110,22 @@ curl "http://127.0.0.1:18080/api/lookup?query=AS15169"
 | `db` | 当前离线库状态。 |
 
 用途融合逻辑：主规则高置信度命中时优先保留主规则，例如公共 DNS、DSL 反向 DNS、保留地址等；在线增强里的机房/出口信息会作为参考证据写入 `evidence`，`inferred_source` 会显示 `主场景规则 + 在线增强参考`。主规则低置信度时，会把主规则、RDAP / WHOIS、AI 和机房/出口推断放入 `source_votes` 做加权投票；只有多源一致且分数明显高于原结论时，才修正 `scene` 和 `inferred_scene`。
+
+### performance
+
+`performance` 用于调试查询慢在哪里，不建议对所有生产调用默认开启。字段单位都是毫秒。
+
+| 字段 | 说明 |
+| --- | --- |
+| `total_ms` | 本次请求总耗时。 |
+| `local_offline_ms` | 本地离线查询耗时，包括规则、Prefix2AS、ASN、分配记录、历史 BGP、反向 DNS 等在线增强前步骤。 |
+| `online_enrichment_ms` | 当前请求等待在线增强的耗时。`fast` 模式缓存未命中时可能只是前台等待窗口。 |
+| `location_ms` | IP 所在地查询耗时。 |
+| `quality_ms` | IP 质量评分耗时。 |
+| `ai_ms` | AI 辅助判断耗时，未启用或未触发时通常不输出。 |
+| `cache_hit` | 在线增强是否命中缓存。 |
+| `refresh_queued` / `refresh_in_progress` | 在线增强是否已转后台刷新。 |
+| `third_party` | 第三方源耗时列表，包含 `name`、`url`、`duration_ms`、`ok`。只记录当前请求实际等待的 Team Cymru、RIPEstat、RDAP、WHOIS、RIPE RIS 等调用。 |
 
 ### ip_quality
 
@@ -292,7 +317,26 @@ X-Admin-Token: 你的token
 GET /api/admin/config
 ```
 
-返回当前配置。敏感字段会隐藏，例如 `admin.token`、`openai_api_key`、`ip2proxy.token`。
+返回当前配置。敏感字段会隐藏，例如 `admin.token`、`openai_api_key`、`anthropic_api_key`、`gemini_api_key`、`ip2proxy.token`。
+
+### 拉取 AI 模型列表
+
+```text
+POST /api/admin/ai/models
+```
+
+用于后台配置页按 provider 在线拉取可用模型。请求字段：
+
+```json
+{
+  "provider": "openai",
+  "api_key": "可选，留空使用已保存配置",
+  "base_url": "可选",
+  "version": "可选，Anthropic 使用"
+}
+```
+
+支持 `openai`、`anthropic`、`gemini`。`openai` 会调用 OpenAI 兼容的 `/v1/models`，适合官方 OpenAI 和兼容服务。
 
 ### 保存配置
 
@@ -339,7 +383,7 @@ GET /api/admin/status
 POST /api/admin/update
 ```
 
-等价于 `POST /api/db/update`，会启动后台离线库更新。启用 full BGP 时，会下载 RouteViews / RIPE RIS 最新 RIB 并生成本地 BGP 摘要索引。
+等价于 `POST /api/db/update`，会启动后台离线库更新。启用 full BGP 时，会下载 RouteViews / RIPE RIS 最新 RIB，生成本地 BGP 摘要，并编译 `bgp-index.bin` 紧凑查询索引。
 
 ## 数据库状态
 

@@ -21,6 +21,8 @@ type Config struct {
 	APIKey   string
 	Model    string
 	BaseURL  string
+	APIType  string
+	Version  string
 	Timeout  time.Duration
 	MaxCache int
 }
@@ -87,7 +89,10 @@ func NewOpenAIAdvisor(cfg Config) *OpenAIAdvisor {
 		cfg.Model = "gpt-5.4-mini"
 	}
 	if cfg.BaseURL == "" {
-		cfg.BaseURL = "https://api.openai.com/v1/responses"
+		cfg.BaseURL = "https://api.openai.com/v1"
+	}
+	if cfg.APIType == "" {
+		cfg.APIType = "responses"
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 8 * time.Second
@@ -117,7 +122,7 @@ func (a *OpenAIAdvisor) Advise(ctx context.Context, input AdviceInput) (Decision
 		return Decision{}, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.cfg.BaseURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint(), bytes.NewReader(body))
 	if err != nil {
 		return Decision{}, err
 	}
@@ -161,6 +166,20 @@ func (a *OpenAIAdvisor) Advise(ctx context.Context, input AdviceInput) (Decision
 }
 
 func (a *OpenAIAdvisor) requestBody(input AdviceInput) map[string]any {
+	if a.cfg.APIType == "chat_completions" {
+		return map[string]any{
+			"model": a.cfg.Model,
+			"messages": []map[string]string{
+				{"role": "system", "content": advisorInstructions()},
+				{"role": "user", "content": mustJSON(input)},
+			},
+			"max_tokens": 200,
+			"response_format": map[string]any{
+				"type":        "json_schema",
+				"json_schema": sceneDecisionJSONSchema(),
+			},
+		}
+	}
 	return map[string]any{
 		"model":             a.cfg.Model,
 		"instructions":      advisorInstructions(),
@@ -176,6 +195,10 @@ func (a *OpenAIAdvisor) requestBody(input AdviceInput) map[string]any {
 			},
 		},
 	}
+}
+
+func (a *OpenAIAdvisor) endpoint() string {
+	return providerEndpoint(a.cfg.BaseURL, a.cfg.APIType)
 }
 
 func (a *OpenAIAdvisor) readCache(key string) (Decision, bool) {
@@ -259,7 +282,12 @@ type responseBody struct {
 		} `json:"content"`
 	} `json:"output"`
 	OutputText string `json:"output_text"`
-	Error      struct {
+	Choices    []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
+	Error struct {
 		Message string `json:"message"`
 	} `json:"error"`
 }
@@ -267,6 +295,11 @@ type responseBody struct {
 func (r responseBody) outputText() string {
 	if r.OutputText != "" {
 		return r.OutputText
+	}
+	for _, choice := range r.Choices {
+		if choice.Message.Content != "" {
+			return choice.Message.Content
+		}
 	}
 	for _, output := range r.Output {
 		for _, content := range output.Content {
@@ -276,4 +309,48 @@ func (r responseBody) outputText() string {
 		}
 	}
 	return ""
+}
+
+func sceneDecisionJSONSchema() map[string]any {
+	return map[string]any{
+		"name":        "ip_asn_scene_decision",
+		"description": "IP 或 ASN 的应用场景判断结果",
+		"strict":      true,
+		"schema":      sceneDecisionSchema(),
+	}
+}
+
+func mustJSON(value any) string {
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
+}
+
+func providerEndpoint(baseURL, apiType string) string {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		baseURL = "https://api.openai.com/v1"
+	}
+	if strings.HasSuffix(baseURL, "/responses") || strings.HasSuffix(baseURL, "/chat/completions") || strings.HasSuffix(baseURL, "/messages") || strings.Contains(baseURL, ":generateContent") {
+		return baseURL
+	}
+	switch apiType {
+	case "chat_completions":
+		return baseURL + "/chat/completions"
+	default:
+		return baseURL + "/responses"
+	}
+}
+
+func modelListBaseURL(baseURL string) string {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	for _, suffix := range []string{"/responses", "/chat/completions", "/messages"} {
+		if strings.HasSuffix(baseURL, suffix) {
+			baseURL = strings.TrimSuffix(baseURL, suffix)
+			break
+		}
+	}
+	if baseURL == "" {
+		baseURL = "https://api.openai.com/v1"
+	}
+	return baseURL
 }

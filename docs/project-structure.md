@@ -45,7 +45,7 @@ internal/store
 internal/update
 ```
 
-- `internal/ai`：低置信度结果的 AI 辅助判断，支持 OpenAI 和 Ollama。
+- `internal/ai`：低置信度结果的 AI 辅助判断，支持 OpenAI、Anthropic、Gemini 和 OpenAI 兼容服务。
 - `internal/classify`：应用场景分类规则和规则匹配。
 - `internal/config`：配置文件、环境变量、默认值读取。
 - `internal/enrich`：Team Cymru、RIPEstat、RDAP、WHOIS 等联网增强查询和缓存。
@@ -71,8 +71,8 @@ data/cache
 - `data/raw`：原始离线数据库，例如 CAIDA、RIR、PeeringDB、IANA RDAP、ip2region、RPKI VRP、IRR route dump、BGP 观察摘要。
 - `data/raw/bgp`：全量 BGP 模式下载的 RouteViews / RIPE RIS MRT RIB 原始文件。
 - `data/raw/history`：历史 BGP 样本。
-- `data/generated`：自动生成的服务规则、BGP 汇总索引和防火墙列表，例如 `services.json`、`bgp-observations-full.jsonl.gz`、`firewall/`。
-- `data/processed`：解析后生成的索引状态和清单。
+- `data/generated`：自动生成的服务规则、BGP 摘要、BGP 紧凑索引和防火墙列表，例如 `services.json`、`bgp-observations-full.jsonl.gz`、`bgp-index.bin`、`firewall/`。
+- `data/processed`：解析后生成的索引状态和清单，包括 `manifest.json` 和用于避免重复下载的 `download-state.json`。
 - `data/cache`：运行时缓存，当前主要是 `data/cache/enrich`。
 
 仓库提交了一份初始化离线库：`data/raw`、`data/generated`、`data/processed`。其中 `data/raw` 和 `data/generated` 通过 Git LFS 管理，克隆后需要 `git lfs pull` 才能拿到真实数据文件。`data/cache` 可以删除，服务会重新生成；后台更新只更新本机数据文件，不会自动提交到 GitHub。

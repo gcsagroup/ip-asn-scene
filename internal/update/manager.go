@@ -10,8 +10,13 @@ import (
 	"time"
 
 	"ipasn/internal/config"
+	"ipasn/internal/firewall"
 	"ipasn/internal/store"
 )
+
+const refreshCooldown = 10 * time.Minute
+
+var generateFirewallLists = firewall.GenerateFromIP2Region
 
 type Manager struct {
 	mu         sync.RWMutex
@@ -34,7 +39,7 @@ type Manager struct {
 
 func NewManager(cfg config.Config) *Manager {
 	m := &Manager{cfg: cfg, downloader: NewDownloader(cfg.HTTPTimeout)}
-	if snap, err := BuildSnapshotFromRaw(cfg.DataDir); err == nil {
+	if snap, err := BuildSnapshot(cfg); err == nil {
 		m.snapshot.Store(snap)
 	} else {
 		m.snapshot.Store(store.EmptySnapshot())
@@ -97,6 +102,7 @@ func (m *Manager) Refresh(ctx context.Context) error {
 		"更新 IP 所在地库",
 		"构建全量 BGP 汇总",
 		"加载离线索引",
+		"生成防火墙 CIDR 列表",
 	}
 	m.startProgress(steps)
 	fail := func(err error) error {
@@ -128,7 +134,12 @@ func (m *Manager) Refresh(ctx context.Context) error {
 	}
 
 	m.setProgressStep(3, "发现 RouteViews / RIPE RIS collector，下载并解析 MRT RIB")
-	if _, err := RefreshFullBGP(ctx, cfg, m.downloader.client); err != nil {
+	if skip, detail := shouldSkipFreshBGPSummary(cfg, time.Now()); skip {
+		if err := ensureBGPCompactIndex(cfg); err != nil {
+			return fail(err)
+		}
+		m.completeProgressStep(3, detail)
+	} else if _, err := RefreshFullBGP(ctx, cfg, m.downloader.client); err != nil {
 		return fail(err)
 	} else if cfg.BGP.Enabled && cfg.BGP.Mode == "full" {
 		m.completeProgressStep(3, "全量 BGP 汇总生成完成")
@@ -137,7 +148,7 @@ func (m *Manager) Refresh(ctx context.Context) error {
 	}
 
 	m.setProgressStep(4, "解析本地 raw/generated 数据并热加载索引")
-	snapshot, err := BuildSnapshotFromRaw(cfg.DataDir)
+	snapshot, err := BuildSnapshot(cfg)
 	if err != nil {
 		return fail(err)
 	}
@@ -145,8 +156,27 @@ func (m *Manager) Refresh(ctx context.Context) error {
 	m.snapshot.Store(snapshot)
 	m.lastError.Store("")
 	m.completeProgressStep(4, fmt.Sprintf("索引加载完成：前缀 %d，ASN %d", snapshot.Status.PrefixCount, snapshot.Status.ASNCount))
+
+	m.setProgressStep(5, "根据 ip2region、ASN、服务规则生成防火墙 CIDR 输出")
+	if summary, err := refreshFirewallLists(ctx, cfg, snapshot); err != nil {
+		return fail(err)
+	} else if cfg.FirewallLists.Enabled && cfg.IP2Region.Enabled {
+		m.completeProgressStep(5, fmt.Sprintf("防火墙列表生成完成：文件 %d，导出记录 %d", len(summary.Files), summary.ExportedRecord))
+	} else if !cfg.FirewallLists.Enabled {
+		m.completeProgressStep(5, "防火墙列表未启用，已跳过")
+	} else {
+		m.completeProgressStep(5, "IP 所在地库未启用，防火墙列表已跳过")
+	}
+
 	m.finishProgress("")
 	return nil
+}
+
+func refreshFirewallLists(ctx context.Context, cfg config.Config, snapshot *store.Snapshot) (firewall.Summary, error) {
+	if !cfg.FirewallLists.Enabled || !cfg.IP2Region.Enabled {
+		return firewall.Summary{}, nil
+	}
+	return generateFirewallLists(ctx, cfg, snapshot)
 }
 
 func (m *Manager) StartAutoUpdate(ctx context.Context) {

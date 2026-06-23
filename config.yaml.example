@@ -14,9 +14,15 @@ ai:
   provider: "auto"
   openai_api_key: ""
   openai_model: "gpt-5.4-mini"
-  openai_base_url: "https://api.openai.com/v1/responses"
-  ollama_model: "qwen3:8b"
-  ollama_base_url: "http://localhost:11434"
+  openai_base_url: "https://api.openai.com/v1"
+  openai_api_type: "responses"
+  anthropic_api_key: ""
+  anthropic_model: "claude-sonnet-4-6"
+  anthropic_base_url: "https://api.anthropic.com"
+  anthropic_version: "2023-06-01"
+  gemini_api_key: ""
+  gemini_model: "gemini-2.5-flash"
+  gemini_base_url: "https://generativelanguage.googleapis.com/v1beta"
   confidence_cutoff: 0.7
   timeout_seconds: 8
   max_cache: 2048

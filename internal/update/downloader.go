@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path"
@@ -37,6 +36,7 @@ func (d *Downloader) DownloadAll(ctx context.Context, cfg config.Config) (Manife
 	}
 
 	files := map[string]string{}
+	cache := newDownloadCache(cfg.DataDir, d.client)
 
 	historyLimit := cfg.History.Snapshots
 	v4Paths, err := d.latestCAIDAURLs(ctx, cfg.Sources.CAIDAv4LogURL, cfg.Sources.CAIDAv4BaseURL, maxInt(1, historyLimit))
@@ -44,12 +44,12 @@ func (d *Downloader) DownloadAll(ctx context.Context, cfg config.Config) (Manife
 		return Manifest{}, err
 	}
 	v4Path := v4Paths[len(v4Paths)-1]
-	if err := d.download(ctx, v4Path, filepath.Join(rawDir, "caida-ipv4.pfx2as.gz")); err != nil {
+	if err := d.download(ctx, cache, v4Path, filepath.Join(rawDir, "caida-ipv4.pfx2as.gz")); err != nil {
 		return Manifest{}, err
 	}
 	files["caida_ipv4"] = v4Path
 	if historyLimit > 0 {
-		if err := d.downloadCAIDAHistory(ctx, rawDir, "ipv4", v4Paths, historyLimit, files); err != nil {
+		if err := d.downloadCAIDAHistory(ctx, cache, rawDir, "ipv4", v4Paths, historyLimit, files); err != nil {
 			return Manifest{}, err
 		}
 	}
@@ -59,25 +59,25 @@ func (d *Downloader) DownloadAll(ctx context.Context, cfg config.Config) (Manife
 		return Manifest{}, err
 	}
 	v6Path := v6Paths[len(v6Paths)-1]
-	if err := d.download(ctx, v6Path, filepath.Join(rawDir, "caida-ipv6.pfx2as.gz")); err != nil {
+	if err := d.download(ctx, cache, v6Path, filepath.Join(rawDir, "caida-ipv6.pfx2as.gz")); err != nil {
 		return Manifest{}, err
 	}
 	files["caida_ipv6"] = v6Path
 	if historyLimit > 0 {
-		if err := d.downloadCAIDAHistory(ctx, rawDir, "ipv6", v6Paths, historyLimit, files); err != nil {
+		if err := d.downloadCAIDAHistory(ctx, cache, rawDir, "ipv6", v6Paths, historyLimit, files); err != nil {
 			return Manifest{}, err
 		}
 	}
 
 	for name, url := range cfg.Sources.RIRURLs {
-		if err := d.download(ctx, url, filepath.Join(rawDir, "rir-"+name+".txt")); err != nil {
+		if err := d.download(ctx, cache, url, filepath.Join(rawDir, "rir-"+name+".txt")); err != nil {
 			return Manifest{}, err
 		}
 		files["rir_"+name] = url
 	}
 
 	if cfg.Sources.PeeringDBURL != "" {
-		if err := d.download(ctx, cfg.Sources.PeeringDBURL, filepath.Join(rawDir, "peeringdb-net.json")); err != nil {
+		if err := d.download(ctx, cache, cfg.Sources.PeeringDBURL, filepath.Join(rawDir, "peeringdb-net.json")); err != nil {
 			return Manifest{}, err
 		}
 		files["peeringdb"] = cfg.Sources.PeeringDBURL
@@ -95,35 +95,36 @@ func (d *Downloader) DownloadAll(ctx context.Context, cfg config.Config) (Manife
 		if item.url == "" {
 			continue
 		}
-		if err := d.download(ctx, item.url, filepath.Join(rawDir, item.file)); err != nil {
+		if err := d.download(ctx, cache, item.url, filepath.Join(rawDir, item.file)); err != nil {
 			return Manifest{}, err
 		}
 		files[item.key] = item.url
 	}
 
 	for name, url := range cfg.Sources.IANARDAPURLs {
-		if err := d.download(ctx, url, filepath.Join(rawDir, "iana-rdap-"+name+".json")); err != nil {
+		if err := d.download(ctx, cache, url, filepath.Join(rawDir, "iana-rdap-"+name+".json")); err != nil {
 			return Manifest{}, err
 		}
 		files["iana_rdap_"+name] = url
 	}
-	if err := d.downloadOptionalList(ctx, cfg.Sources.RPKIVRPURLs, rawDir, "rpki-vrps", ".csv", "rpki_vrp", files); err != nil {
+	if err := d.downloadOptionalList(ctx, cache, cfg.Sources.RPKIVRPURLs, rawDir, "rpki-vrps", ".csv", "rpki_vrp", files); err != nil {
 		return Manifest{}, err
 	}
-	if err := d.downloadOptionalList(ctx, cfg.Sources.IRRRouteURLs, rawDir, "irr-routes", ".db", "irr_route", files); err != nil {
+	if err := d.downloadOptionalList(ctx, cache, cfg.Sources.IRRRouteURLs, rawDir, "irr-routes", ".db", "irr_route", files); err != nil {
 		return Manifest{}, err
 	}
-	if err := d.downloadOptionalList(ctx, cfg.Sources.BGPObservationURLs, rawDir, "bgp-observations", ".jsonl", "bgp_observation", files); err != nil {
+	if err := d.downloadOptionalList(ctx, cache, cfg.Sources.BGPObservationURLs, rawDir, "bgp-observations", ".jsonl", "bgp_observation", files); err != nil {
 		return Manifest{}, err
 	}
-	if err := d.downloadOptionalList(ctx, cfg.Sources.GeofeedURLs, rawDir, "geofeed", ".csv", "geofeed", files); err != nil {
+	if err := d.downloadOptionalList(ctx, cache, cfg.Sources.GeofeedURLs, rawDir, "geofeed", ".csv", "geofeed", files); err != nil {
 		return Manifest{}, err
 	}
 
 	manifest := Manifest{
-		Version:   time.Now().UTC().Format("20060102T150405Z"),
-		UpdatedAt: time.Now().UTC(),
-		RawFiles:  files,
+		Version:       time.Now().UTC().Format("20060102T150405Z"),
+		UpdatedAt:     time.Now().UTC(),
+		RawFiles:      files,
+		DownloadStats: cache.Stats(),
 	}
 	manifestPath := filepath.Join(processedDir, "manifest.json")
 	encoded, err := json.MarshalIndent(manifest, "", "  ")
@@ -168,12 +169,12 @@ func (d *Downloader) latestCAIDAURLs(ctx context.Context, logURL, baseURL string
 	return urls, nil
 }
 
-func (d *Downloader) downloadCAIDAHistory(ctx context.Context, rawDir, family string, urls []string, limit int, files map[string]string) error {
+func (d *Downloader) downloadCAIDAHistory(ctx context.Context, cache *downloadCache, rawDir, family string, urls []string, limit int, files map[string]string) error {
 	historyDir := filepath.Join(rawDir, "history")
 	for i, sourceURL := range urls {
 		name := "caida-" + family + "-" + sanitizeHistoryFileName(path.Base(sourceURL))
 		destination := filepath.Join(historyDir, name)
-		if err := d.download(ctx, sourceURL, destination); err != nil {
+		if err := d.download(ctx, cache, sourceURL, destination); err != nil {
 			return err
 		}
 		files[fmt.Sprintf("caida_history_%s_%d", family, i)] = sourceURL
@@ -181,48 +182,20 @@ func (d *Downloader) downloadCAIDAHistory(ctx context.Context, rawDir, family st
 	return pruneHistoryFiles(historyDir, "caida-"+family+"-*.pfx2as.gz", limit)
 }
 
-func (d *Downloader) download(ctx context.Context, url, destination string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
+func (d *Downloader) download(ctx context.Context, cache *downloadCache, url, destination string) error {
+	if cache == nil {
+		cache = newDownloadCache(filepath.Dir(filepath.Dir(destination)), d.client)
 	}
-	resp, err := d.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("download %s: HTTP %d", url, resp.StatusCode)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(destination), 0o775); err != nil {
-		return err
-	}
-	tmp := destination + ".tmp"
-	file, err := os.Create(tmp)
-	if err != nil {
-		return err
-	}
-	_, copyErr := io.Copy(file, resp.Body)
-	closeErr := file.Close()
-	if copyErr != nil {
-		_ = os.Remove(tmp)
-		return copyErr
-	}
-	if closeErr != nil {
-		_ = os.Remove(tmp)
-		return closeErr
-	}
-	return os.Rename(tmp, destination)
+	return cache.DownloadFile(ctx, url, destination)
 }
 
-func (d *Downloader) downloadOptionalList(ctx context.Context, urls []string, rawDir, prefix, defaultExt, manifestKey string, files map[string]string) error {
+func (d *Downloader) downloadOptionalList(ctx context.Context, cache *downloadCache, urls []string, rawDir, prefix, defaultExt, manifestKey string, files map[string]string) error {
 	for i, sourceURL := range urls {
 		if strings.TrimSpace(sourceURL) == "" {
 			continue
 		}
 		name := numberedDownloadName(prefix, i, defaultExt, sourceURL)
-		if err := d.download(ctx, sourceURL, filepath.Join(rawDir, name)); err != nil {
+		if err := d.download(ctx, cache, sourceURL, filepath.Join(rawDir, name)); err != nil {
 			return err
 		}
 		files[fmt.Sprintf("%s_%d", manifestKey, i)] = sourceURL

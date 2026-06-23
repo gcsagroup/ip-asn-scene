@@ -25,6 +25,7 @@ type Config struct {
 	Enrichment     EnrichmentConfig
 	History        HistoryConfig
 	Quality        QualityConfig
+	Performance    PerformanceConfig
 	DynamicRules   DynamicRulesConfig
 	IP2Region      IP2RegionConfig
 	FirewallLists  FirewallListsConfig
@@ -43,8 +44,14 @@ type AIConfig struct {
 	OpenAIAPIKey     string
 	OpenAIModel      string
 	OpenAIBaseURL    string
-	OllamaModel      string
-	OllamaBaseURL    string
+	OpenAIAPIType    string
+	AnthropicAPIKey  string
+	AnthropicModel   string
+	AnthropicBaseURL string
+	AnthropicVersion string
+	GeminiAPIKey     string
+	GeminiModel      string
+	GeminiBaseURL    string
 	ConfidenceCutoff float64
 	Timeout          time.Duration
 	MaxCache         int
@@ -73,6 +80,12 @@ type QualityConfig struct {
 	RateLimitScore         int
 }
 
+type PerformanceConfig struct {
+	Enabled           bool
+	IncludeDefault    bool
+	ThirdPartyDefault bool
+}
+
 type BGPConfig struct {
 	Enabled              bool          `json:"enabled" yaml:"enabled"`
 	Mode                 string        `json:"mode" yaml:"mode"`
@@ -83,10 +96,13 @@ type BGPConfig struct {
 	HistorySnapshots     int           `json:"history_snapshots" yaml:"history_snapshots"`
 	RefreshInterval      time.Duration `json:"-" yaml:"-"`
 	MaxParallelDownloads int           `json:"max_parallel_downloads" yaml:"max_parallel_downloads"`
+	DownloadTimeout      time.Duration `json:"-" yaml:"-"`
 	MaxParallelParse     int           `json:"max_parallel_parse" yaml:"max_parallel_parse"`
 	KeepRaw              bool          `json:"keep_raw" yaml:"keep_raw"`
 	RawRetentionDays     int           `json:"raw_retention_days" yaml:"raw_retention_days"`
 	SummaryFile          string        `json:"summary_file" yaml:"summary_file"`
+	IndexMode            string        `json:"index_mode" yaml:"index_mode"`
+	IndexFile            string        `json:"index_file" yaml:"index_file"`
 	RouteViewsBaseURL    string        `json:"routeviews_base_url" yaml:"routeviews_base_url"`
 	RIPERISBaseURL       string        `json:"ripe_ris_base_url" yaml:"ripe_ris_base_url"`
 	Month                string        `json:"month,omitempty" yaml:"month,omitempty"`
@@ -191,6 +207,7 @@ type fileConfig struct {
 	Enrichment          fileEnrichmentConfig    `yaml:"enrichment"`
 	History             fileHistoryConfig       `yaml:"history"`
 	Quality             fileQualityConfig       `yaml:"quality"`
+	Performance         filePerformanceConfig   `yaml:"performance"`
 	DynamicRules        fileDynamicRulesConfig  `yaml:"dynamic_rules"`
 	IP2Region           fileIP2RegionConfig     `yaml:"ip2region"`
 	FirewallLists       fileFirewallListsConfig `yaml:"firewall_lists"`
@@ -210,8 +227,14 @@ type fileAIConfig struct {
 	OpenAIAPIKey     string   `yaml:"openai_api_key"`
 	OpenAIModel      string   `yaml:"openai_model"`
 	OpenAIBaseURL    string   `yaml:"openai_base_url"`
-	OllamaModel      string   `yaml:"ollama_model"`
-	OllamaBaseURL    string   `yaml:"ollama_base_url"`
+	OpenAIAPIType    string   `yaml:"openai_api_type"`
+	AnthropicAPIKey  string   `yaml:"anthropic_api_key"`
+	AnthropicModel   string   `yaml:"anthropic_model"`
+	AnthropicBaseURL string   `yaml:"anthropic_base_url"`
+	AnthropicVersion string   `yaml:"anthropic_version"`
+	GeminiAPIKey     string   `yaml:"gemini_api_key"`
+	GeminiModel      string   `yaml:"gemini_model"`
+	GeminiBaseURL    string   `yaml:"gemini_base_url"`
 	ConfidenceCutoff *float64 `yaml:"confidence_cutoff"`
 	TimeoutSeconds   *int     `yaml:"timeout_seconds"`
 	MaxCache         *int     `yaml:"max_cache"`
@@ -240,6 +263,12 @@ type fileQualityConfig struct {
 	RateLimitScore         *int     `yaml:"rate_limit_score"`
 }
 
+type filePerformanceConfig struct {
+	Enabled           *bool `yaml:"enabled"`
+	IncludeDefault    *bool `yaml:"include_default"`
+	ThirdPartyDefault *bool `yaml:"third_party_default"`
+}
+
 type fileBGPConfig struct {
 	Enabled              *bool    `yaml:"enabled"`
 	Mode                 string   `yaml:"mode"`
@@ -250,10 +279,13 @@ type fileBGPConfig struct {
 	HistorySnapshots     *int     `yaml:"history_snapshots"`
 	RefreshHours         *int     `yaml:"refresh_hours"`
 	MaxParallelDownloads *int     `yaml:"max_parallel_downloads"`
+	DownloadTimeoutSecs  *int     `yaml:"download_timeout_seconds"`
 	MaxParallelParse     *int     `yaml:"max_parallel_parse"`
 	KeepRaw              *bool    `yaml:"keep_raw"`
 	RawRetentionDays     *int     `yaml:"raw_retention_days"`
 	SummaryFile          string   `yaml:"summary_file"`
+	IndexMode            string   `yaml:"index_mode"`
+	IndexFile            string   `yaml:"index_file"`
 	RouteViewsBaseURL    string   `yaml:"routeviews_base_url"`
 	RIPERISBaseURL       string   `yaml:"ripe_ris_base_url"`
 	Month                string   `yaml:"month"`
@@ -357,9 +389,13 @@ func Default() Config {
 		AI: AIConfig{
 			Provider:         "auto",
 			OpenAIModel:      "gpt-5.4-mini",
-			OpenAIBaseURL:    "https://api.openai.com/v1/responses",
-			OllamaModel:      "qwen3:8b",
-			OllamaBaseURL:    "http://localhost:11434",
+			OpenAIBaseURL:    "https://api.openai.com/v1",
+			OpenAIAPIType:    "responses",
+			AnthropicModel:   "claude-sonnet-4-6",
+			AnthropicBaseURL: "https://api.anthropic.com",
+			AnthropicVersion: "2023-06-01",
+			GeminiModel:      "gemini-2.5-flash",
+			GeminiBaseURL:    "https://generativelanguage.googleapis.com/v1beta",
 			ConfidenceCutoff: 0.7,
 			Timeout:          8 * time.Second,
 			MaxCache:         2048,
@@ -384,6 +420,11 @@ func Default() Config {
 			ChallengeScore:         40,
 			RateLimitScore:         20,
 		},
+		Performance: PerformanceConfig{
+			Enabled:           true,
+			IncludeDefault:    false,
+			ThirdPartyDefault: true,
+		},
 		BGP: BGPConfig{
 			Enabled:              true,
 			Mode:                 "full",
@@ -394,10 +435,13 @@ func Default() Config {
 			HistorySnapshots:     7,
 			RefreshInterval:      8 * time.Hour,
 			MaxParallelDownloads: 4,
+			DownloadTimeout:      2 * time.Hour,
 			MaxParallelParse:     2,
 			KeepRaw:              true,
 			RawRetentionDays:     30,
 			SummaryFile:          "data/generated/bgp-observations-full.jsonl.gz",
+			IndexMode:            "compact",
+			IndexFile:            "data/generated/bgp-index.bin",
 			RouteViewsBaseURL:    "https://archive.routeviews.org/",
 			RIPERISBaseURL:       "https://data.ris.ripe.net/",
 		},
@@ -525,6 +569,7 @@ func SaveToFile(path string, cfg Config) error {
 	updateHours := int(cfg.UpdateInterval / time.Hour)
 	httpTimeoutSeconds := int(cfg.HTTPTimeout / time.Second)
 	refreshHours := int(cfg.BGP.RefreshInterval / time.Hour)
+	bgpDownloadTimeoutSeconds := int(cfg.BGP.DownloadTimeout / time.Second)
 	aiTimeoutSeconds := int(cfg.AI.Timeout / time.Second)
 	enrichmentTTLHours := int(cfg.Enrichment.TTL / time.Hour)
 	enrichmentTimeoutSeconds := int(cfg.Enrichment.Timeout / time.Second)
@@ -546,8 +591,14 @@ func SaveToFile(path string, cfg Config) error {
 			OpenAIAPIKey:     cfg.AI.OpenAIAPIKey,
 			OpenAIModel:      cfg.AI.OpenAIModel,
 			OpenAIBaseURL:    cfg.AI.OpenAIBaseURL,
-			OllamaModel:      cfg.AI.OllamaModel,
-			OllamaBaseURL:    cfg.AI.OllamaBaseURL,
+			OpenAIAPIType:    cfg.AI.OpenAIAPIType,
+			AnthropicAPIKey:  cfg.AI.AnthropicAPIKey,
+			AnthropicModel:   cfg.AI.AnthropicModel,
+			AnthropicBaseURL: cfg.AI.AnthropicBaseURL,
+			AnthropicVersion: cfg.AI.AnthropicVersion,
+			GeminiAPIKey:     cfg.AI.GeminiAPIKey,
+			GeminiModel:      cfg.AI.GeminiModel,
+			GeminiBaseURL:    cfg.AI.GeminiBaseURL,
 			ConfidenceCutoff: floatPtr(cfg.AI.ConfidenceCutoff),
 			TimeoutSeconds:   intPtr(aiTimeoutSeconds),
 			MaxCache:         intPtr(cfg.AI.MaxCache),
@@ -572,6 +623,11 @@ func SaveToFile(path string, cfg Config) error {
 			ChallengeScore:         intPtr(cfg.Quality.ChallengeScore),
 			RateLimitScore:         intPtr(cfg.Quality.RateLimitScore),
 		},
+		Performance: filePerformanceConfig{
+			Enabled:           boolPtr(cfg.Performance.Enabled),
+			IncludeDefault:    boolPtr(cfg.Performance.IncludeDefault),
+			ThirdPartyDefault: boolPtr(cfg.Performance.ThirdPartyDefault),
+		},
 		BGP: fileBGPConfig{
 			Enabled:              boolPtr(cfg.BGP.Enabled),
 			Mode:                 cfg.BGP.Mode,
@@ -582,10 +638,13 @@ func SaveToFile(path string, cfg Config) error {
 			HistorySnapshots:     intPtr(cfg.BGP.HistorySnapshots),
 			RefreshHours:         intPtr(refreshHours),
 			MaxParallelDownloads: intPtr(cfg.BGP.MaxParallelDownloads),
+			DownloadTimeoutSecs:  intPtr(bgpDownloadTimeoutSeconds),
 			MaxParallelParse:     intPtr(cfg.BGP.MaxParallelParse),
 			KeepRaw:              boolPtr(cfg.BGP.KeepRaw),
 			RawRetentionDays:     intPtr(cfg.BGP.RawRetentionDays),
 			SummaryFile:          cfg.BGP.SummaryFile,
+			IndexMode:            cfg.BGP.IndexMode,
+			IndexFile:            cfg.BGP.IndexFile,
 			RouteViewsBaseURL:    cfg.BGP.RouteViewsBaseURL,
 			RIPERISBaseURL:       cfg.BGP.RIPERISBaseURL,
 			Month:                cfg.BGP.Month,
@@ -729,6 +788,7 @@ func applyConfigFile(cfg *Config, path string) error {
 		cfg.History.Snapshots = *file.History.Snapshots
 	}
 	applyQualityFileConfig(&cfg.Quality, file.Quality)
+	applyPerformanceFileConfig(&cfg.Performance, file.Performance)
 	applyBGPFileConfig(&cfg.BGP, file.BGP)
 	applyAdminFileConfig(&cfg.Admin, file.Admin)
 	applyDynamicRulesFileConfig(&cfg.DynamicRules, file.DynamicRules)
@@ -765,6 +825,18 @@ func applyQualityFileConfig(cfg *QualityConfig, file fileQualityConfig) {
 	}
 }
 
+func applyPerformanceFileConfig(cfg *PerformanceConfig, file filePerformanceConfig) {
+	if file.Enabled != nil {
+		cfg.Enabled = *file.Enabled
+	}
+	if file.IncludeDefault != nil {
+		cfg.IncludeDefault = *file.IncludeDefault
+	}
+	if file.ThirdPartyDefault != nil {
+		cfg.ThirdPartyDefault = *file.ThirdPartyDefault
+	}
+}
+
 func applyBGPFileConfig(cfg *BGPConfig, file fileBGPConfig) {
 	if file.Enabled != nil {
 		cfg.Enabled = *file.Enabled
@@ -793,6 +865,9 @@ func applyBGPFileConfig(cfg *BGPConfig, file fileBGPConfig) {
 	if file.MaxParallelDownloads != nil && *file.MaxParallelDownloads > 0 {
 		cfg.MaxParallelDownloads = *file.MaxParallelDownloads
 	}
+	if file.DownloadTimeoutSecs != nil && *file.DownloadTimeoutSecs > 0 {
+		cfg.DownloadTimeout = time.Duration(*file.DownloadTimeoutSecs) * time.Second
+	}
 	if file.MaxParallelParse != nil && *file.MaxParallelParse > 0 {
 		cfg.MaxParallelParse = *file.MaxParallelParse
 	}
@@ -804,6 +879,12 @@ func applyBGPFileConfig(cfg *BGPConfig, file fileBGPConfig) {
 	}
 	if file.SummaryFile != "" {
 		cfg.SummaryFile = file.SummaryFile
+	}
+	if file.IndexMode != "" {
+		cfg.IndexMode = file.IndexMode
+	}
+	if file.IndexFile != "" {
+		cfg.IndexFile = file.IndexFile
 	}
 	if file.RouteViewsBaseURL != "" {
 		cfg.RouteViewsBaseURL = file.RouteViewsBaseURL
@@ -846,11 +927,29 @@ func applyAIFileConfig(cfg *AIConfig, file fileAIConfig) {
 	if file.OpenAIBaseURL != "" {
 		cfg.OpenAIBaseURL = file.OpenAIBaseURL
 	}
-	if file.OllamaModel != "" {
-		cfg.OllamaModel = file.OllamaModel
+	if file.OpenAIAPIType != "" {
+		cfg.OpenAIAPIType = file.OpenAIAPIType
 	}
-	if file.OllamaBaseURL != "" {
-		cfg.OllamaBaseURL = file.OllamaBaseURL
+	if file.AnthropicAPIKey != "" {
+		cfg.AnthropicAPIKey = file.AnthropicAPIKey
+	}
+	if file.AnthropicModel != "" {
+		cfg.AnthropicModel = file.AnthropicModel
+	}
+	if file.AnthropicBaseURL != "" {
+		cfg.AnthropicBaseURL = file.AnthropicBaseURL
+	}
+	if file.AnthropicVersion != "" {
+		cfg.AnthropicVersion = file.AnthropicVersion
+	}
+	if file.GeminiAPIKey != "" {
+		cfg.GeminiAPIKey = file.GeminiAPIKey
+	}
+	if file.GeminiModel != "" {
+		cfg.GeminiModel = file.GeminiModel
+	}
+	if file.GeminiBaseURL != "" {
+		cfg.GeminiBaseURL = file.GeminiBaseURL
 	}
 	if file.ConfidenceCutoff != nil && *file.ConfidenceCutoff > 0 && *file.ConfidenceCutoff <= 1 {
 		cfg.ConfidenceCutoff = *file.ConfidenceCutoff
@@ -861,6 +960,7 @@ func applyAIFileConfig(cfg *AIConfig, file fileAIConfig) {
 	if file.MaxCache != nil && *file.MaxCache > 0 {
 		cfg.MaxCache = *file.MaxCache
 	}
+	normalizeAIConfig(cfg)
 }
 
 func applyEnrichmentFileConfig(cfg *EnrichmentConfig, file fileEnrichmentConfig) {
@@ -1144,11 +1244,29 @@ func applyEnv(cfg *Config) {
 	if value := os.Getenv("OPENAI_BASE_URL"); value != "" {
 		cfg.AI.OpenAIBaseURL = value
 	}
-	if value := os.Getenv("OLLAMA_MODEL"); value != "" {
-		cfg.AI.OllamaModel = value
+	if value := os.Getenv("OPENAI_API_TYPE"); value != "" {
+		cfg.AI.OpenAIAPIType = value
 	}
-	if value := os.Getenv("OLLAMA_BASE_URL"); value != "" {
-		cfg.AI.OllamaBaseURL = value
+	if value := os.Getenv("ANTHROPIC_API_KEY"); value != "" {
+		cfg.AI.AnthropicAPIKey = value
+	}
+	if value := os.Getenv("ANTHROPIC_MODEL"); value != "" {
+		cfg.AI.AnthropicModel = value
+	}
+	if value := os.Getenv("ANTHROPIC_BASE_URL"); value != "" {
+		cfg.AI.AnthropicBaseURL = value
+	}
+	if value := os.Getenv("ANTHROPIC_VERSION"); value != "" {
+		cfg.AI.AnthropicVersion = value
+	}
+	if value := os.Getenv("GEMINI_API_KEY"); value != "" {
+		cfg.AI.GeminiAPIKey = value
+	}
+	if value := os.Getenv("GEMINI_MODEL"); value != "" {
+		cfg.AI.GeminiModel = value
+	}
+	if value := os.Getenv("GEMINI_BASE_URL"); value != "" {
+		cfg.AI.GeminiBaseURL = value
 	}
 	if value := os.Getenv("AI_CONFIDENCE_CUTOFF"); value != "" {
 		if parsed, err := strconv.ParseFloat(value, 64); err == nil && parsed > 0 && parsed <= 1 {
@@ -1225,6 +1343,15 @@ func applyEnv(cfg *Config) {
 			cfg.Quality.RateLimitScore = parsed
 		}
 	}
+	if value := os.Getenv("PERFORMANCE_ENABLED"); value != "" {
+		cfg.Performance.Enabled = parseEnvBool(value)
+	}
+	if value := os.Getenv("PERFORMANCE_INCLUDE_DEFAULT"); value != "" {
+		cfg.Performance.IncludeDefault = parseEnvBool(value)
+	}
+	if value := os.Getenv("PERFORMANCE_THIRD_PARTY_DEFAULT"); value != "" {
+		cfg.Performance.ThirdPartyDefault = parseEnvBool(value)
+	}
 	if value := os.Getenv("BGP_ENABLED"); value != "" {
 		cfg.BGP.Enabled = parseEnvBool(value)
 	}
@@ -1258,6 +1385,11 @@ func applyEnv(cfg *Config) {
 			cfg.BGP.MaxParallelDownloads = parsed
 		}
 	}
+	if value := os.Getenv("BGP_DOWNLOAD_TIMEOUT_SECONDS"); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.BGP.DownloadTimeout = time.Duration(parsed) * time.Second
+		}
+	}
 	if value := os.Getenv("BGP_MAX_PARALLEL_PARSE"); value != "" {
 		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
 			cfg.BGP.MaxParallelParse = parsed
@@ -1273,6 +1405,12 @@ func applyEnv(cfg *Config) {
 	}
 	if value := os.Getenv("BGP_SUMMARY_FILE"); value != "" {
 		cfg.BGP.SummaryFile = value
+	}
+	if value := os.Getenv("BGP_INDEX_MODE"); value != "" {
+		cfg.BGP.IndexMode = value
+	}
+	if value := os.Getenv("BGP_INDEX_FILE"); value != "" {
+		cfg.BGP.IndexFile = value
 	}
 	if value := os.Getenv("BGP_ROUTEVIEWS_BASE_URL"); value != "" {
 		cfg.BGP.RouteViewsBaseURL = value
@@ -1432,6 +1570,7 @@ func applyEnv(cfg *Config) {
 	if value := os.Getenv("GEOFEED_URLS"); value != "" {
 		cfg.Sources.GeofeedURLs = splitList(value)
 	}
+	normalizeAIConfig(&cfg.AI)
 	normalizeBGPConfig(&cfg.BGP)
 	normalizeAdminConfig(&cfg.Admin)
 	normalizeFirewallListsConfig(&cfg.FirewallLists)
@@ -1466,6 +1605,55 @@ func parseEnvBool(value string) bool {
 	return normalized != "0" && normalized != "false" && normalized != "no" && normalized != "off"
 }
 
+func normalizeAIConfig(cfg *AIConfig) {
+	cfg.Provider = strings.ToLower(strings.TrimSpace(cfg.Provider))
+	switch cfg.Provider {
+	case "", "auto":
+		cfg.Provider = "auto"
+	case "off", "openai", "anthropic", "gemini":
+	default:
+		cfg.Provider = "auto"
+	}
+	if strings.TrimSpace(cfg.OpenAIModel) == "" {
+		cfg.OpenAIModel = "gpt-5.4-mini"
+	}
+	if strings.TrimSpace(cfg.OpenAIBaseURL) == "" {
+		cfg.OpenAIBaseURL = "https://api.openai.com/v1"
+	}
+	cfg.OpenAIAPIType = strings.ToLower(strings.TrimSpace(cfg.OpenAIAPIType))
+	switch cfg.OpenAIAPIType {
+	case "", "responses":
+		cfg.OpenAIAPIType = "responses"
+	case "chat_completions":
+	default:
+		cfg.OpenAIAPIType = "responses"
+	}
+	if strings.TrimSpace(cfg.AnthropicModel) == "" {
+		cfg.AnthropicModel = "claude-sonnet-4-6"
+	}
+	if strings.TrimSpace(cfg.AnthropicBaseURL) == "" {
+		cfg.AnthropicBaseURL = "https://api.anthropic.com"
+	}
+	if strings.TrimSpace(cfg.AnthropicVersion) == "" {
+		cfg.AnthropicVersion = "2023-06-01"
+	}
+	if strings.TrimSpace(cfg.GeminiModel) == "" {
+		cfg.GeminiModel = "gemini-2.5-flash"
+	}
+	if strings.TrimSpace(cfg.GeminiBaseURL) == "" {
+		cfg.GeminiBaseURL = "https://generativelanguage.googleapis.com/v1beta"
+	}
+	if cfg.ConfidenceCutoff <= 0 || cfg.ConfidenceCutoff > 1 {
+		cfg.ConfidenceCutoff = 0.7
+	}
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = 8 * time.Second
+	}
+	if cfg.MaxCache <= 0 {
+		cfg.MaxCache = 2048
+	}
+}
+
 func normalizeBGPConfig(cfg *BGPConfig) {
 	cfg.Mode = strings.ToLower(strings.TrimSpace(cfg.Mode))
 	if cfg.Mode == "" {
@@ -1480,11 +1668,21 @@ func normalizeBGPConfig(cfg *BGPConfig) {
 	if cfg.MaxParallelDownloads <= 0 {
 		cfg.MaxParallelDownloads = 1
 	}
+	if cfg.DownloadTimeout <= 0 {
+		cfg.DownloadTimeout = 2 * time.Hour
+	}
 	if cfg.MaxParallelParse <= 0 {
 		cfg.MaxParallelParse = 1
 	}
 	if cfg.SummaryFile == "" {
 		cfg.SummaryFile = "data/generated/bgp-observations-full.jsonl.gz"
+	}
+	cfg.IndexMode = strings.ToLower(strings.TrimSpace(cfg.IndexMode))
+	if cfg.IndexMode == "" {
+		cfg.IndexMode = "compact"
+	}
+	if cfg.IndexFile == "" {
+		cfg.IndexFile = "data/generated/bgp-index.bin"
 	}
 	if cfg.RouteViewsBaseURL == "" {
 		cfg.RouteViewsBaseURL = "https://archive.routeviews.org/"
