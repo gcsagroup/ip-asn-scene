@@ -302,3 +302,7 @@ go test -race ./...
 git lfs fsck
 git diff --check
 ```
+
+## 许可证
+
+本项目使用 [MIT License](LICENSE) 发布。

@@ -241,3 +241,7 @@ go test ./...
 git diff --check
 git lfs fsck
 ```
+
+## License
+
+This project is released under the [MIT License](LICENSE).

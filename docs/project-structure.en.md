@@ -10,6 +10,7 @@ This document uses `IPASN/` as the project root.
 README.md
 README.zh-Hant.md
 README.en.md
+LICENSE
 .github/workflows/release.yml
 .gitattributes
 .gitignore
@@ -22,6 +23,7 @@ go.sum
 - `README.md`: Simplified Chinese project entry.
 - `README.zh-Hant.md`: Traditional Chinese project entry.
 - `README.en.md`: English project entry.
+- `LICENSE`: MIT License text.
 - `.github/workflows/release.yml`: GitHub Actions release workflow. It tests, tags, and uploads multi-platform binaries after pushes to `main`.
 - `.gitattributes`: Git LFS tracking rules for large data files.
 - `.gitignore`: local configuration, cache, build output, and log ignore rules.

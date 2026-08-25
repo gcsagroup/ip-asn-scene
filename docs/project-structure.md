@@ -10,6 +10,7 @@
 README.md
 README.zh-Hant.md
 README.en.md
+LICENSE
 .github/workflows/release.yml
 .gitattributes
 .gitignore
@@ -22,6 +23,7 @@ go.sum
 - `README.md`：简体中文项目入口说明，放快速运行、接口、数据来源和常用命令。
 - `README.zh-Hant.md`：繁体中文项目入口说明。
 - `README.en.md`：英文项目入口说明。
+- `LICENSE`：MIT License 许可证文本。
 - `.github/workflows/release.yml`：GitHub Actions 自动发布配置，推送到 `main` 后测试、打 tag、上传多平台单文件可执行程序。
 - `.gitattributes`：Git LFS 跟踪规则，当前用于 `data/raw/**` 和 `data/generated/**`。
 - `.gitignore`：本机配置、缓存、构建产物和运行日志的忽略规则。

@@ -303,3 +303,7 @@ go test -race ./...
 git lfs fsck
 git diff --check
 ```
+
+## 授權條款
+
+本項目使用 [MIT License](LICENSE) 發佈。
