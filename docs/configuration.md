@@ -157,9 +157,13 @@ bgp:
 
 全量 BGP 会明显增加后台更新时间和磁盘占用，但不会让普通查询实时访问公网。默认查询路径读取 `index_file` 紧凑索引；索引不存在且未禁用时，后台更新会从 `summary_file` 本地补齐，不需要重新下载 RIB。
 
+`index_file` 是本机可重建索引，默认不提交到 Git。需要让其他机器直接使用紧凑索引时，应把它作为独立部署资产分发，或在目标机器上执行一次离线库更新生成。
+
 ## 下载状态缓存
 
 后台更新会维护 `data/processed/download-state.json`，记录公开源 URL、`ETag`、`Last-Modified`、`SHA256`、本地缓存文件和下载时间。再次更新同一 URL 时会发送 `If-None-Match` / `If-Modified-Since`；源站返回 `304 Not Modified` 时直接复用本地文件，不再重复下载 body。没有提供 `ETag` / `Last-Modified` 的源，会在短时间内复用本地缓存，避免连续点击造成重复拉取。
+
+`download-state.json`、`download-cache/` 和 `bgp-refresh-state.json` 是本机更新状态缓存，默认不提交。发布新的初始化离线库时，只提交需要分发的原始库、生成库和 `manifest.json`。
 
 ## 配置管理后台
 
@@ -339,6 +343,8 @@ data/generated/firewall/scene-TOR.cidr
 开启 `write_entries` 后会额外输出 `data/generated/firewall/entries.jsonl`。
 
 生成器会对同一个输出文件里的相邻/重叠网段做合并，最终文件包含 IPv4 和 IPv6 CIDR。地区列表主要来自 ip2region 全量库；公司和场景会结合 ip2region 的 `ISP` / `ASN` 字段、ASN 信息、离线服务规则和场景规则生成。`TOR` / `PROXY` 更依赖 Tor / IP2Proxy 等专用离线来源，ip2region 只补充所在地和 ASN 信息。
+
+`output_dir` 是可重建输出目录，默认不提交到 Git。需要给防火墙系统使用时，建议从部署机直接生成，或把生成结果作为单独发布包分发。
 
 ## 数据源
 

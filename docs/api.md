@@ -383,7 +383,7 @@ GET /api/admin/status
 POST /api/admin/update
 ```
 
-等价于 `POST /api/db/update`，会启动后台离线库更新。启用 full BGP 时，会下载 RouteViews / RIPE RIS 最新 RIB，生成本地 BGP 摘要，并编译 `bgp-index.bin` 紧凑查询索引。
+等价于 `POST /api/db/update`，会启动后台离线库更新。启用 full BGP 时，会下载 RouteViews / RIPE RIS 最新 RIB，生成本地 BGP 摘要，并编译 `bgp-index.bin` 紧凑查询索引。该索引是本机可重建文件，默认不提交到 Git。
 
 ## 数据库状态
 

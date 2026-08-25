@@ -41,7 +41,7 @@ dist/ipasn-linux-amd64
 dist/ipasn-windows-amd64.exe
 ```
 
-`ipasn` 是本机 macOS 测试用文件，`dist` 目录里的 Linux 和 Windows 文件可以直接部署。
+`ipasn` 是本机 macOS 测试用文件，`dist` 目录里的 Linux 和 Windows 文件可以直接部署。`ipasn`、`bin/` 和 `dist/` 都是构建产物，默认不提交到 Git。
 
 ## GitHub 自动发布
 
@@ -71,9 +71,10 @@ SHA256SUMS.txt
 ```bash
 git lfs install
 git lfs pull
+cp config.yaml.example config.yaml
 ```
 
-之后可以直接启动服务。后台更新只会更新当前机器上的 `data` 文件，不会自动提交或推送到 GitHub。
+之后按需要修改 `config.yaml`，再启动服务。后台更新只会更新当前机器上的 `data` 文件，不会自动提交或推送到 GitHub。
 
 ## 首次准备数据库
 
@@ -85,12 +86,20 @@ git lfs pull
 
 这一步会下载离线数据库并生成查询索引。以后服务会按 `update_interval_hours` 自动更新。
 
+更新后的 `data/raw`、`data/generated/services.json`、`data/generated/bgp-observations-full.jsonl.gz`、`data/processed/manifest.json` 只有在你明确要发布新的初始化离线库时才提交。`data/generated/bgp-index.bin`、`data/processed/download-state.json`、`data/processed/download-cache/` 属于本机状态或可重建索引，默认不提交。
+
 ## 生成防火墙 CIDR 列表
 
 确认 `config.yaml` 里的 `firewall_lists` 已配置后执行：
 
 ```bash
 ./ipasn -config config.yaml -generate-firewall-lists
+```
+
+也可以使用专用配置生成更完整的国家、云厂商、IDC/CDN 列表：
+
+```bash
+./ipasn -config generate_firewall.yaml -generate-firewall-lists
 ```
 
 默认输出到：
@@ -112,7 +121,39 @@ scene-PROXY.cidr
 
 如果在 `firewall_lists.write_entries` 打开明细输出，会额外生成 `entries.jsonl`。
 
-生成过程读取 ip2region IPv4/IPv6 xdb 全量库，并结合 ASN、规则和本地离线索引。后续后台更新离线库不会自动提交这些生成结果。
+生成过程读取 ip2region IPv4/IPv6 xdb 全量库，并结合 ASN、规则和本地离线索引。`data/generated/firewall/` 是可重建发布产物，默认不提交；需要随 Release 附带时建议打包为独立资产，而不是混入源码提交。
+
+## 发布前检查
+
+提交到 GitHub 前建议执行：
+
+```bash
+go test ./... -count=1
+git lfs fsck
+git diff --check
+git status --ignored -s
+```
+
+发布分支里不应出现这些未忽略或待提交文件：
+
+```text
+.DS_Store
+.gocache/
+.gomodcache/
+bin/
+dist/
+logs/
+screenlog.*
+data/cache/
+data/evaluation/
+data/generated/firewall/
+data/generated/bgp-index.bin
+data/processed/download-cache/
+data/processed/download-state.json
+data/processed/bgp-refresh-state.json
+```
+
+`config.yaml` 是本机配置，正常情况下应只显示为 ignored。若要发布新的离线库版本，先确认 LFS 文件完整，再提交对应的 `data/raw`、`data/generated` 和 `data/processed/manifest.json`。
 
 ## 启动服务
 

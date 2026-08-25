@@ -4,6 +4,16 @@
 
 当前项目是 Go 服务，README 是项目主要说明入口。仓库保存源码、规则、脚本、配置模板、文档和一份 Git LFS 管理的初始化离线库；运行缓存、本机配置和编译产物不进入 Git。
 
+## 当前发布状态
+
+截至 2026-08-24，项目已清理为发布用结构：
+
+- 源码、规则、脚本、配置模板、文档和初始化离线库保留在仓库。
+- `data/raw` 和需要随仓库分发的 `data/generated` 文件使用 Git LFS 管理。
+- `config.yaml` 是本机正式配置，可能包含授权地址、后台 token、证书路径或 AI key，默认不提交。
+- 本机生成内容不提交，包括 `.DS_Store`、`.gocache/`、`.gomodcache/`、`bin/`、`dist/`、`logs/`、`screenlog.*`、`data/cache/`、`data/evaluation/`、`data/generated/firewall/`、`data/generated/bgp-index.bin`、`data/processed/download-cache/`、`data/processed/download-state.json`、`data/processed/bgp-refresh-state.json`。
+- 后台更新只更新当前机器的离线数据；是否把更新后的 `data/raw`、`data/generated/services.json`、`data/generated/bgp-observations-full.jsonl.gz`、`data/processed/manifest.json` 发布到 GitHub，需要单独确认。
+
 ## 功能
 
 - 支持 IP 查询和 ASN 查询
@@ -26,6 +36,14 @@
 - 支持编译为单文件可执行程序
 
 ## 快速运行
+
+首次克隆后先拉取 Git LFS 数据并生成本机配置：
+
+```bash
+git lfs install
+git lfs pull
+cp config.yaml.example config.yaml
+```
 
 下载离线库并退出：
 
@@ -52,7 +70,7 @@ go run ./cmd/ipasn -config config.yaml -generate-firewall-lists
 go run ./cmd/ipasn -config generate_firewall.yaml -generate-firewall-lists
 ```
 
-默认会读取 ip2region IPv4/IPv6 全载库，结合 ASN、服务规则和本地离线索引，合并相邻/重叠网段后输出到 `data/generated/firewall`。
+默认会读取 ip2region IPv4/IPv6 全载库，结合 ASN、服务规则和本地离线索引，合并相邻/重叠网段后输出到 `data/generated/firewall`。该目录是可重新生成的发布产物，默认不提交。
 
 所在地查询已在 `config.yaml` 里启用，需要默认显示时把 `include_default` 改成 `true`。
 
@@ -238,7 +256,9 @@ data/generated/services.json
 
 详细说明见 [配置文件说明](docs/configuration.md)。
 
-`config.yaml` 可能包含商业授权下载地址、后台 token、证书路径等本机信息，默认不会提交。仓库提交了一份初始化离线库，`data/raw` 和 `data/generated` 通过 Git LFS 管理；克隆源码后先执行 `git lfs pull`，即可直接使用随仓库带的离线数据。后台更新只更新本机 `data` 文件，不会自动提交到 GitHub。运行缓存、评估输出、构建产物和本机可执行文件不会提交，包括 `data/cache`、`data/evaluation`、`dist`、本机 `ipasn` 可执行文件和 zip 归档。
+`config.yaml` 可能包含商业授权下载地址、后台 token、证书路径等本机信息，默认不会提交。仓库提交了一份初始化离线库，`data/raw` 和部分 `data/generated` 文件通过 Git LFS 管理；克隆源码后先执行 `git lfs pull`，即可直接使用随仓库带的离线数据。
+
+后台更新只更新本机 `data` 文件，不会自动提交到 GitHub。运行缓存、评估输出、构建产物和本机可执行文件不会提交，包括 `.DS_Store`、`.gocache/`、`.gomodcache/`、`bin/`、`data/cache/`、`data/evaluation/`、`data/generated/firewall/`、`data/generated/bgp-index.bin`、`data/processed/download-cache/`、`data/processed/download-state.json`、`data/processed/bgp-refresh-state.json`、`dist/`、`logs/`、`screenlog.*`、本机 `ipasn` 可执行文件和 zip 归档。
 
 ## 编译和服务安装
 
@@ -268,7 +288,9 @@ tls:
 ## 验证
 
 ```bash
-go test ./...
+go test ./... -count=1
 go test -race ./...
 ./scripts/build-release.sh
+git lfs fsck
+git diff --check
 ```

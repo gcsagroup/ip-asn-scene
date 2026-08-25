@@ -47,6 +47,11 @@ quality:
   challenge_score: 40
   rate_limit_score: 20
 
+performance:
+  enabled: true
+  include_default: false
+  third_party_default: true
+
 bgp:
   enabled: true
   mode: "full"
@@ -58,10 +63,13 @@ bgp:
   history_snapshots: 7
   refresh_hours: 8
   max_parallel_downloads: 4
+  download_timeout_seconds: 7200
   max_parallel_parse: 2
   keep_raw: true
   raw_retention_days: 30
   summary_file: "data/generated/bgp-observations-full.jsonl.gz"
+  index_mode: "compact"
+  index_file: "data/generated/bgp-index.bin"
   routeviews_base_url: "https://archive.routeviews.org/"
   ripe_ris_base_url: "https://data.ris.ripe.net/"
 
