@@ -1,5 +1,7 @@
 # API 文档
 
+> 语言 / Language: 简体中文 | [繁體中文](api.zh-Hant.md) | [English](api.en.md) | [返回 README](../README.md)
+
 默认服务地址：
 
 ```text

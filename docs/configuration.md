@@ -1,5 +1,7 @@
 # 配置文件说明
 
+> 语言 / Language: 简体中文 | [繁體中文](configuration.zh-Hant.md) | [English](configuration.en.md) | [返回 README](../README.md)
+
 默认配置文件名：
 
 ```text

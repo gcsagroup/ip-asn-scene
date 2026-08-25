@@ -1,5 +1,7 @@
 # 部署文档
 
+> 语言 / Language: 简体中文 | [繁體中文](deploy.zh-Hant.md) | [English](deploy.en.md) | [返回 README](../README.md)
+
 ## 目录建议
 
 Linux：

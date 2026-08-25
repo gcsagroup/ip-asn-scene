@@ -1,11 +1,15 @@
 # 项目目录和文件说明
 
+> 语言 / Language: 简体中文 | [繁體中文](project-structure.zh-Hant.md) | [English](project-structure.en.md) | [返回 README](../README.md)
+
 以下说明以 `IPASN/` 为项目根目录。
 
 ## 根目录
 
 ```text
 README.md
+README.zh-Hant.md
+README.en.md
 .github/workflows/release.yml
 .gitattributes
 .gitignore
@@ -15,7 +19,9 @@ go.mod
 go.sum
 ```
 
-- `README.md`：项目入口说明，放快速运行、接口、数据来源和常用命令。
+- `README.md`：简体中文项目入口说明，放快速运行、接口、数据来源和常用命令。
+- `README.zh-Hant.md`：繁体中文项目入口说明。
+- `README.en.md`：英文项目入口说明。
 - `.github/workflows/release.yml`：GitHub Actions 自动发布配置，推送到 `main` 后测试、打 tag、上传多平台单文件可执行程序。
 - `.gitattributes`：Git LFS 跟踪规则，当前用于 `data/raw/**` 和 `data/generated/**`。
 - `.gitignore`：本机配置、缓存、构建产物和运行日志的忽略规则。
@@ -109,15 +115,26 @@ rules/asn_scenes.yaml
 
 ```text
 docs/deploy.md
+docs/deploy.zh-Hant.md
+docs/deploy.en.md
 docs/api.md
+docs/api.zh-Hant.md
+docs/api.en.md
 docs/configuration.md
+docs/configuration.zh-Hant.md
+docs/configuration.en.md
 docs/project-structure.md
+docs/project-structure.zh-Hant.md
+docs/project-structure.en.md
 ```
 
-- `deploy.md`：Linux / Windows 部署、服务安装、HTTPS、常用命令。
-- `api.md`：HTTP API 参数、响应字段、在线增强模式、机房/出口、路由安全和数据质量字段说明。
-- `configuration.md`：配置文件字段说明。
-- `project-structure.md`：项目目录和文件说明。
+- `*.md`：简体中文文档。
+- `*.zh-Hant.md`：繁体中文文档。
+- `*.en.md`：英文文档。
+- `deploy.*.md`：Linux / Windows 部署、服务安装、HTTPS、常用命令。
+- `api.*.md`：HTTP API 参数、响应字段、在线增强模式、机房/出口、路由安全和数据质量字段说明。
+- `configuration.*.md`：配置文件字段说明。
+- `project-structure.*.md`：项目目录和文件说明。
 
 ## scripts
 

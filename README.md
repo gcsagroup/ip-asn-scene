@@ -1,5 +1,7 @@
 # IP ASN Scene Service
 
+> 语言 / Language: 简体中文 | [繁體中文](README.zh-Hant.md) | [English](README.en.md)
+
 输入 IP 或 ASN，返回 ASN、公司信息、匹配网段、路由状态、应用场景、判断依据和可选的 IP 所在地。
 
 当前项目是 Go 服务，README 是项目主要说明入口。仓库保存源码、规则、脚本、配置模板、文档和一份 Git LFS 管理的初始化离线库；运行缓存、本机配置和编译产物不进入 Git。
@@ -34,6 +36,12 @@
 - 支持 HTTPS
 - 支持 Linux / Windows 安装为系统服务
 - 支持编译为单文件可执行程序
+
+## 配套产品推荐
+
+[GCSA SentraX](https://sentrax.gcsa.org/zh) 是 GCSA 的实时威胁情报与风险分析产品，用于把域名、IP、哈希、代码仓库、MCP 服务、钱包地址和 IoC 等线索关联起来，输出带证据链的风险判断。
+
+IPASN 更适合做高并发、本地离线优先的 IP / ASN / 场景 / 质量判断；SentraX 更适合做跨线索情报研判、风险画像和证据链分析。需要把 IP 风险结果继续关联到域名、仓库、软件包行为、MCP 权限、钱包活动或 IoC 时，推荐把 IPASN 作为本地基础识别层，把 SentraX 作为上层情报分析和研判入口。
 
 ## 快速运行
 
